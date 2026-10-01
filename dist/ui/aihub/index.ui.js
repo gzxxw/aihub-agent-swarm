@@ -179,6 +179,8 @@ function Screen(ctx) {
   var logState = useStateValue(ctx, "log", []);
   var setupBusyState = useStateValue(ctx, "setupBusy", false);
   var broadcastBusyState = useStateValue(ctx, "broadcastBusy", false);
+  var webAccountState = useStateValue(ctx, "webAccount", "");
+  var webPasswordState = useStateValue(ctx, "webPassword", "");
 
   function pushLog(entry) {
     var next = logState.value.concat([entry]);
@@ -407,6 +409,35 @@ function Screen(ctx) {
     }
   };
 
+  // 网页版 agent 自动登录：用填好的账号密码走密码登录
+  var doWebAutoLogin = async function (agentId) {
+    var account = (webAccountState.value || "").trim();
+    var password = (webPasswordState.value || "").trim();
+    if (!account || !password) {
+      errorState.set("请先填写 DeepSeek 账号和密码");
+      return;
+    }
+    statusTextState.set("正在自动登录 DeepSeek…");
+    errorState.set("");
+    try {
+      var result = await callTool(ctx, TOOL_WEBLOGIN, { agent: agentId, account: account, password: password });
+      if (!result || !result.success) {
+        errorState.set((result && result.error) || "自动登录失败");
+      }
+      else {
+        pushLog({
+          t: Date.now(),
+          kind: "weblogin",
+          text: "已自动填入账号密码并提交登录，请在浏览器浮窗确认"
+        });
+        statusTextState.set("已提交登录，请在浏览器浮窗确认（如有验证码请手动完成）");
+      }
+    }
+    catch (error) {
+      errorState.set(toErrorText(error));
+    }
+  };
+
   var children = [];
 
   // 标题区
@@ -541,12 +572,33 @@ function Screen(ctx) {
                 onClick: function (agentId) { return function () { toggleAgent(agentId); }; }(agent.agent)
               }),
               ctx.UI.Button({
-                text: "登录",
+                text: "打开网页",
                 onClick: function (agentId) { return function () { doWebLogin(agentId); }; }(agent.agent)
               }),
               ctx.UI.Button({
                 text: "保存登录",
                 onClick: function (agentId) { return function () { saveWebLogin(agentId); }; }(agent.agent)
+              })
+            ]),
+            ctx.UI.TextField({
+              label: "DeepSeek 账号（邮箱/手机号）",
+              placeholder: "登录账号",
+              value: webAccountState.value,
+              onValueChange: webAccountState.set,
+              singleLine: true
+            }),
+            ctx.UI.TextField({
+              label: "DeepSeek 密码",
+              placeholder: "登录密码",
+              value: webPasswordState.value,
+              onValueChange: webPasswordState.set,
+              singleLine: true
+            }),
+            ctx.UI.Row({ spacing: 8 }, [
+              ctx.UI.Button({
+                text: "自动登录（填账号密码）",
+                fillMaxWidth: true,
+                onClick: function (agentId) { return function () { doWebAutoLogin(agentId); }; }(agent.agent)
               })
             ])
           ])
