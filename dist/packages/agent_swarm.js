@@ -1,0 +1,1012 @@
+/* METADATA
+{
+  "name": "agent_swarm",
+  "display_name": {
+    "zh": "AIHub 多Agent协作台",
+    "en": "AIHub Multi-Agent Hub"
+  },
+  "description": {
+    "zh": "把 Operit 原生多个模型包装为独立 agent，支持单人设、单问、广播、状态与配额监控。",
+    "en": "Wrap Operit built-in models as independent agents with per-persona, single ask, broadcast, status and quota monitoring."
+  },
+  "enabledByDefault": true,
+  "category": "AI",
+  "env": [
+    {
+      "name": "AIHUB_AGENT_CONFIG_ID",
+      "description": { "zh": "承载多 agent 的模型配置 ID（默认自动发现日月新聚合配置）", "en": "Model config id that hosts the agents (auto-discovered by default)" },
+      "required": false
+    }
+  ],
+  "tools": [
+    {
+      "name": "aihub_advice",
+      "description": {
+        "zh": "AIHub 使用建议：\\n- 用 aihub_ask 让单个 agent 回答；用 aihub_broadcast 让多个 agent 同时回答。\\n- agent 可选：deepseek_v4_flash / deepseek_v41_flash / glm_5_2 / kimi_k3 / sensenova_lite。\\n- 每个 agent 有独立人设（快枪手/深度思考/稳重长文/创意灵感/轻快闲聊）。\\n- 首次使用前先 aihub_setup 自动建角色卡。",
+        "en": "AIHub usage advice:\\n- Use aihub_ask for a single agent; use aihub_broadcast for multiple agents.\\n- Agents: deepseek_v4_flash / deepseek_v41_flash / glm_5_2 / kimi_k3 / sensenova_lite.\\n- Each agent has its own persona (fast / deep / steady / creative / light).\\n- Run aihub_setup once to auto-create character cards."
+      },
+      "parameters": [],
+      "advice": true
+    },
+    {
+      "name": "aihub_setup",
+      "description": {
+        "zh": "扫描 Operit 模型配置，自动为 5 个 agent 创建/校验角色卡（FIXED_CONFIG 绑定对应模型），并返回每个 agent 的就绪状态。首次使用 AIHub 前调用一次。",
+        "en": "Scan Operit model configs, auto-create/verify character cards for 5 agents (FIXED_CONFIG bound), and return readiness of each agent. Call once before using AIHub."
+      },
+      "parameters": []
+    },
+    {
+      "name": "aihub_ask",
+      "description": {
+        "zh": "向单个 agent 提问。返回该 agent 的回答、人设、耗时、模型名与配额快照。",
+        "en": "Ask a single agent. Returns the agent's reply, persona, elapsed ms, model name and quota snapshot."
+      },
+      "parameters": [
+        {
+          "name": "agent",
+          "description": { "zh": "agent 标识：deepseek_v4_flash / deepseek_v41_flash / glm_5_2 / kimi_k3 / sensenova_lite", "en": "Agent id: deepseek_v4_flash / deepseek_v41_flash / glm_5_2 / kimi_k3 / sensenova_lite" },
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "prompt",
+          "description": { "zh": "要提问的内容", "en": "The prompt to ask" },
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "context",
+          "description": { "zh": "可选上下文/人设增强，会附加到角色卡人设之后", "en": "Optional extra context appended after the card persona" },
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "aihub_broadcast",
+      "description": {
+        "zh": "向多个 agent 广播同一问题，汇总每个 agent 的回答、耗时与状态；自动跳过未就绪 agent。",
+        "en": "Broadcast one question to multiple agents, aggregate each reply, elapsed and status; skip unready agents."
+      },
+      "parameters": [
+        {
+          "name": "prompt",
+          "description": { "zh": "要广播的问题", "en": "The question to broadcast" },
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "agents",
+          "description": { "zh": "agent 标识数组（不传则使用全部可用 agent）", "en": "Array of agent ids (defaults to all ready agents)" },
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "context",
+          "description": { "zh": "可选共享上下文", "en": "Optional shared context" },
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "aihub_status",
+      "description": {
+        "zh": "查看全部 agent 状态：就绪/缺失/人设/模型名/角色卡ID，以及承载配置信息。",
+        "en": "Show status of all agents: ready/missing/persona/model/role-card id, plus hosting config info."
+      },
+      "parameters": []
+    },
+    {
+      "name": "aihub_quota",
+      "description": {
+        "zh": "查看 Operit 模型配置中与 agent 相关的模型配额信息（配置名、模型列表、限额设置）。",
+        "en": "Show quota-related info of the hosting model config (config name, model list, limits)."
+      },
+      "parameters": []
+    },
+    {
+      "name": "aihub_task",
+      "description": {
+        "zh": "【核心】智能任务编排：提交一个总任务，自动分配/拆解给合适的 agent 各自在独立会话中执行，最后汇总成一份结果。支持计划模式：mode=plan 只生成分配计划（不执行）；mode=execute 传入 plan 后按计划执行；默认 auto 一步到位。用法：aihub_task({task: \"写一个Python爬虫...\", mode: \"plan\"})。",
+        "en": "[CORE] Smart task orchestration: submit a task, auto-decompose and assign to fitting agents in isolated chats, then aggregate into one final result. Plan mode: mode=plan returns the plan only; mode=execute runs a given plan; default auto runs end-to-end. Usage: aihub_task({task: \"...\", mode: \"plan\"})."
+      },
+      "parameters": [
+        {
+          "name": "task",
+          "description": { "zh": "要完成的总任务描述", "en": "The overall task description" },
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "agents",
+          "description": { "zh": "可选，限定参与分配的 agent 列表（不传则自动从全部 5 个 agent 中分配）", "en": "Optional; restrict participating agents (defaults to auto from all 5)" },
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "mode",
+          "description": { "zh": "可选，plan=只生成分配计划不执行；execute=按传入 plan 执行；auto=一步到位（默认）", "en": "Optional; plan=plan only, execute=run given plan, auto=end-to-end (default)" },
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "plan",
+          "description": { "zh": "可选，mode=execute 时传入的分配计划数组（元素含 agent/subtask/reason）", "en": "Optional; the plan array to execute when mode=execute (items with agent/subtask/reason)" },
+          "type": "array",
+          "required": false
+        }
+      ]
+    }
+  ]
+}
+*/
+
+"use strict";
+
+// ---------------------------------------------------------------------------
+// AIHub 多Agent协作台 - 后端工具实现
+// ---------------------------------------------------------------------------
+
+var AGENTS = [
+  {
+    id: "deepseek_v4_flash",
+    modelName: "deepseek-v4-flash",
+    displayName: "DeepSeek V4 Flash",
+    persona: "你是『快枪手』，擅长快速给出简洁、准确、可执行的回答。语言精炼，不废话，直接给结论、步骤或代码。",
+    color: "#4FC3F7",
+    description: "快速通用助手"
+  },
+  {
+    id: "deepseek_v41_flash",
+    modelName: "deepseek-flash",
+    displayName: "DeepSeek V4.1 Flash",
+    persona: "你是『深度思考者』，擅长拆解复杂问题、多角度分析、给出推理过程和严谨结论。回答结构清晰，先分析后结论。",
+    color: "#B39DDB",
+    description: "深度推理助手"
+  },
+  {
+    id: "glm_5_2",
+    modelName: "glm-5.2",
+    displayName: "GLM 5.2",
+    persona: "你是『稳重的智者』，擅长长文写作、方案规划、知识讲解。表达稳重、条理分明、考虑周全，适合需要完整输出的任务。",
+    color: "#FFB74D",
+    description: "稳重长文助手"
+  },
+  {
+    id: "kimi_k3",
+    modelName: "kimi-k3",
+    displayName: "Kimi K3",
+    persona: "你是『创意灵感家』，擅长头脑风暴、创意点子、发散思维、故事创作。回答有想象力，敢于给出新颖的视角。",
+    color: "#F06292",
+    description: "创意灵感助手"
+  },
+  {
+    id: "sensenova_lite",
+    modelName: "sensenova-6.8-flash-lite",
+    displayName: "商量 6.8 Flash Lite",
+    persona: "你是『轻快的伙伴』，擅长日常闲聊、轻松问答、简洁回复。语气亲切自然，回答简短有温度。",
+    color: "#81C784",
+    description: "轻快闲聊助手"
+  }
+];
+
+var CARD_PREFIX = "aihub_agent_";
+var AIHUB_GROUP = "AIHub";
+
+function asText(value) {
+  return String(value == null ? "" : value);
+}
+
+function firstNonBlank() {
+  for (var i = 0; i < arguments.length; i++) {
+    var value = asText(arguments[i]).trim();
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function jsonParseSafe(raw) {
+  if (typeof raw === "object" && raw !== null) {
+    return raw;
+  }
+  try {
+    var text = asText(raw).trim();
+    if (!text) {
+      return null;
+    }
+    var parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  }
+  catch (error) {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 模型配置发现：找到承载 5 个 agent 的配置
+// ---------------------------------------------------------------------------
+
+async function discoverHostConfig() {
+  var envConfigId = null;
+  try {
+    envConfigId = asText(await Tools.SoftwareSettings.readEnvironmentVariable("AIHUB_AGENT_CONFIG_ID")).trim();
+  }
+  catch (error) {
+    envConfigId = null;
+  }
+
+  var configsResult = await Tools.SoftwareSettings.listModelConfigs();
+  var configs = (configsResult && configsResult.configs) || [];
+
+  // 1. env 指定优先
+  if (envConfigId) {
+    var byEnv = configs.filter(function (config) {
+      return config.id === envConfigId;
+    });
+    if (byEnv.length > 0) {
+      return { config: byEnv[0], source: "env" };
+    }
+  }
+
+  // 2. 自动发现：包含最多 agent 模型名的配置
+  var best = null;
+  var bestCount = -1;
+  configs.forEach(function (config) {
+    var modelList = (config && config.modelList) || [];
+    var count = 0;
+    AGENTS.forEach(function (agent) {
+      if (modelList.indexOf(agent.modelName) >= 0) {
+        count += 1;
+      }
+    });
+    if (count > bestCount) {
+      bestCount = count;
+      best = config;
+    }
+  });
+
+  if (best && bestCount > 0) {
+    return { config: best, source: "auto", matchedCount: bestCount };
+  }
+
+  // 3. 兜底：默认配置
+  var fallback = configs.filter(function (config) {
+    return config.id === "default";
+  });
+  if (fallback.length > 0) {
+    return { config: fallback[0], source: "default", matchedCount: 0 };
+  }
+
+  return { config: null, source: "none", matchedCount: 0 };
+}
+
+function modelIndexOf(config, modelName) {
+  if (!config) {
+    return -1;
+  }
+  var modelList = (config && config.modelList) || [];
+  var idx = modelList.indexOf(modelName);
+  if (idx >= 0) {
+    return idx;
+  }
+  // 兼容 modelName 逗号分隔
+  var modelNameField = asText(config.modelName).split(",").map(function (item) {
+    return item.trim();
+  });
+  idx = modelNameField.indexOf(modelName);
+  return idx;
+}
+
+// ---------------------------------------------------------------------------
+// 角色卡：为每个 agent 建卡（FIXED_CONFIG 绑定）
+// ---------------------------------------------------------------------------
+
+async function listCharacterCards() {
+  try {
+    var result = await Tools.SoftwareSettings.listCharacterCards();
+    return (result && result.cards) || [];
+  }
+  catch (error) {
+    return [];
+  }
+}
+
+async function findAgentCard(cards, agentId) {
+  var wantName = CARD_PREFIX + agentId;
+  for (var i = 0; i < cards.length; i++) {
+    if (asText(cards[i].id) === wantName || asText(cards[i].name) === wantName) {
+      return cards[i];
+    }
+  }
+  return null;
+}
+
+async function createAgentCard(agent, configId, modelIndex) {
+  var cardName = CARD_PREFIX + agent.id;
+  var createResult = await Tools.SoftwareSettings.createCharacterCard({
+    name: cardName,
+    description: agent.description + "（AIHub 自动生成）",
+    character_setting: agent.persona,
+    chat_model_binding_mode: "FIXED_CONFIG",
+    chat_model_config_id: configId,
+    chat_model_index: modelIndex,
+    tool_access_enabled: false,
+    advanced_custom_prompt: agent.persona
+  });
+  var card = (createResult && createResult.card) || null;
+  return {
+    cardId: card ? asText(card.id) : "",
+    created: !!(createResult && createResult.created)
+  };
+}
+
+async function setupAllAgents() {
+  var host = await discoverHostConfig();
+  if (!host.config) {
+    return {
+      success: false,
+      error: "未找到承载 agent 的模型配置",
+      agents: []
+    };
+  }
+
+  var cards = await listCharacterCards();
+  var results = [];
+  var createdCount = 0;
+  var readyCount = 0;
+
+  for (var i = 0; i < AGENTS.length; i++) {
+    var agent = AGENTS[i];
+    var modelIndex = modelIndexOf(host.config, agent.modelName);
+    if (modelIndex < 0) {
+      results.push({
+        agent: agent.id,
+        modelName: agent.modelName,
+        ready: false,
+        reason: "模型不在当前配置中",
+        modelIndex: -1
+      });
+      continue;
+    }
+
+    var card = await findAgentCard(cards, agent.id);
+    var cardId = "";
+    var created = false;
+    if (card) {
+      cardId = asText(card.id);
+    }
+    else {
+      var createResult = await createAgentCard(agent, host.config.id, modelIndex);
+      cardId = createResult.cardId;
+      created = createResult.created;
+      if (created) {
+        createdCount += 1;
+      }
+    }
+
+    readyCount += 1;
+    results.push({
+      agent: agent.id,
+      displayName: agent.displayName,
+      modelName: agent.modelName,
+      modelIndex: modelIndex,
+      persona: agent.persona,
+      ready: true,
+      cardId: cardId,
+      created: created,
+      configId: host.config.id,
+      configName: host.config.name
+    });
+  }
+
+  return {
+    success: true,
+    hostConfigId: host.config.id,
+    hostConfigName: host.config.name,
+    source: host.source,
+    matchedModelCount: host.matchedCount || 0,
+    createdCount: createdCount,
+    readyCount: readyCount,
+    agents: results
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 发送提问：为 agent 建/复用专属 chat，绑定角色卡，sendMessage
+// ---------------------------------------------------------------------------
+
+async function ensureAgentChat(agent, cardId) {
+  // 查找已有 AIHub 专属 chat（标题含 agent id + AIHub），有则复用
+  var chats = [];
+  try {
+    var listResult = await Tools.Chat.listChats({ limit: 50, sort_by: "updatedAt", sort_order: "desc" });
+    chats = (listResult && listResult.chats) || [];
+  }
+  catch (error) {
+    chats = [];
+  }
+  for (var i = 0; i < chats.length; i++) {
+    var title = asText(chats[i].title);
+    if (title.indexOf(agent.id) >= 0 && title.indexOf("AIHub") >= 0) {
+      return chats[i].id;
+    }
+  }
+
+  // 没有专属 chat：启动服务后创建独立会话（不切换当前会话）
+  try {
+    await Tools.Chat.startService();
+  }
+  catch (error) {
+    // 忽略 startService 错误，继续尝试
+  }
+  var createResult = await Tools.Chat.createNew("AIHub子任务", false, cardId);
+  var chatId = (createResult && createResult.chatId) || "";
+  if (chatId) {
+    try {
+      await Tools.Chat.updateTitle(chatId, "AIHub/" + agent.displayName);
+    }
+    catch (error) {
+      // 忽略
+    }
+  }
+  return chatId;
+}
+
+async function askAgent(agentId, prompt, context) {
+  var agent = null;
+  for (var i = 0; i < AGENTS.length; i++) {
+    if (AGENTS[i].id === agentId) {
+      agent = AGENTS[i];
+      break;
+    }
+  }
+  if (!agent) {
+    return {
+      success: false,
+      error: "未知 agent: " + agentId + "，可选: " + AGENTS.map(function (a) { return a.id; }).join(", ")
+    };
+  }
+
+  var host = await discoverHostConfig();
+  if (!host.config) {
+    return { success: false, agent: agentId, error: "未找到承载模型配置，请先 aihub_setup" };
+  }
+
+  var cards = await listCharacterCards();
+  var card = await findAgentCard(cards, agentId);
+  var cardId = card ? asText(card.id) : "";
+
+  if (!cardId) {
+    var modelIndex = modelIndexOf(host.config, agent.modelName);
+    if (modelIndex < 0) {
+      return {
+        success: false,
+        agent: agentId,
+        error: "模型 " + agent.modelName + " 不在配置 " + host.config.name + " 中，请先 aihub_setup"
+      };
+    }
+    var createResult = await createAgentCard(agent, host.config.id, modelIndex);
+    cardId = createResult.cardId;
+  }
+
+  // 每个 agent 独立会话（创建/复用专属 chat），绝不污染当前会话
+  var chatId = await ensureAgentChat(agent, cardId);
+  if (!chatId) {
+    return { success: false, agent: agentId, error: "创建 agent 独立会话失败（chat service 不可用）" };
+  }
+
+  var finalPrompt = prompt;
+  if (context && asText(context).trim()) {
+    finalPrompt = "【附加上下文】\n" + asText(context).trim() + "\n\n【任务】\n" + asText(prompt).trim();
+  }
+
+  var startedAt = Date.now();
+  try {
+    // sendMessage(message, chatId, roleCardId, senderName, options)
+    var sendResult = await Tools.Chat.sendMessage(finalPrompt, chatId, cardId, agent.displayName, {
+      timeout_ms: 180000,
+      persist_turn: true,
+      hide_user_message: true,
+      notify_reply: false
+    });
+    var elapsedMs = Date.now() - startedAt;
+    var reply = "";
+    if (sendResult) {
+      // MessageSendResultData 字段：aiResponse / message / chatId
+      reply = firstNonBlank(sendResult.aiResponse, sendResult.reply, sendResult.text, sendResult.content, sendResult.message);
+    }
+    return {
+      success: !!reply,
+      agent: agentId,
+      displayName: agent.displayName,
+      persona: agent.persona,
+      modelName: agent.modelName,
+      cardId: cardId,
+      chatId: chatId,
+      reply: reply,
+      elapsedMs: elapsedMs,
+      configId: host.config.id,
+      configName: host.config.name
+    };
+  }
+  catch (error) {
+    return {
+      success: false,
+      agent: agentId,
+      error: error && error.message ? error.message : String(error),
+      elapsedMs: Date.now() - startedAt,
+      chatId: chatId
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 广播：多 agent 并行（相互独立，串行队列防护见说明）
+// ---------------------------------------------------------------------------
+
+async function broadcast(prompt, agents, context) {
+  var targets = [];
+  if (agents && Array.isArray(agents) && agents.length > 0) {
+    targets = agents;
+  }
+  else {
+    targets = AGENTS.map(function (a) { return a.id; });
+  }
+
+  var results = [];
+  for (var i = 0; i < targets.length; i++) {
+    var result = await askAgent(targets[i], prompt, context);
+    results.push({
+      agent: result.agent,
+      displayName: result.displayName || "",
+      success: result.success,
+      reply: result.reply || "",
+      error: result.error || "",
+      elapsedMs: result.elapsedMs || 0,
+      modelName: result.modelName || ""
+    });
+  }
+
+  var succeeded = results.filter(function (r) { return r.success; });
+  var failed = results.filter(function (r) { return !r.success; });
+
+  return {
+    success: succeeded.length > 0,
+    total: results.length,
+    succeededCount: succeeded.length,
+    failedCount: failed.length,
+    prompt: prompt,
+    results: results,
+    summary: "广播完成：" + succeeded.length + " 成功 / " + failed.length + " 失败"
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 工具实现
+// ---------------------------------------------------------------------------
+
+async function aihub_setup(params) {
+  try {
+    return await setupAllAgents();
+  }
+  catch (error) {
+    return {
+      success: false,
+      error: error && error.message ? error.message : String(error)
+    };
+  }
+}
+
+async function aihub_ask(params) {
+  try {
+    var agent = asText(params && params.agent).trim();
+    var prompt = asText(params && params.prompt).trim();
+    if (!agent) {
+      return { success: false, error: "缺少参数 agent" };
+    }
+    if (!prompt) {
+      return { success: false, error: "缺少参数 prompt" };
+    }
+    return await askAgent(agent, prompt, asText(params && params.context).trim());
+  }
+  catch (error) {
+    return {
+      success: false,
+      error: error && error.message ? error.message : String(error)
+    };
+  }
+}
+
+async function aihub_broadcast(params) {
+  try {
+    var prompt = asText(params && params.prompt).trim();
+    if (!prompt) {
+      return { success: false, error: "缺少参数 prompt" };
+    }
+    var agents = params && params.agents;
+    var context = asText(params && params.context).trim();
+    return await broadcast(prompt, agents, context);
+  }
+  catch (error) {
+    return {
+      success: false,
+      error: error && error.message ? error.message : String(error)
+    };
+  }
+}
+
+async function aihub_status(params) {
+  try {
+    var host = await discoverHostConfig();
+    if (!host.config) {
+      return { success: false, error: "未找到承载配置" };
+    }
+    var cards = await listCharacterCards();
+    var agents = [];
+    AGENTS.forEach(function (agent) {
+      var modelIndex = modelIndexOf(host.config, agent.modelName);
+      var card = null;
+      for (var i = 0; i < cards.length; i++) {
+        if (asText(cards[i].id) === (CARD_PREFIX + agent.id) || asText(cards[i].name) === (CARD_PREFIX + agent.id)) {
+          card = cards[i];
+          break;
+        }
+      }
+      agents.push({
+        agent: agent.id,
+        displayName: agent.displayName,
+        modelName: agent.modelName,
+        modelIndex: modelIndex,
+        persona: agent.persona,
+        cardBound: !!card,
+        cardId: card ? asText(card.id) : "",
+        ready: modelIndex >= 0 && !!card
+      });
+    });
+    return {
+      success: true,
+      hostConfigId: host.config.id,
+      hostConfigName: host.config.name,
+      source: host.source,
+      agents: agents,
+      advice: "若 agent 未就绪，先运行 aihub_setup"
+    };
+  }
+  catch (error) {
+    return {
+      success: false,
+      error: error && error.message ? error.message : String(error)
+    };
+  }
+}
+
+async function aihub_quota(params) {
+  try {
+    var host = await discoverHostConfig();
+    if (!host.config) {
+      return { success: false, error: "未找到承载配置" };
+    }
+    var config = host.config;
+    return {
+      success: true,
+      configId: config.id,
+      configName: config.name,
+      provider: config.apiProviderType || "",
+      modelList: config.modelList || [],
+      agentModels: AGENTS.map(function (a) { return a.modelName; }),
+      limits: {
+        requestLimitPerMinute: config.requestLimitPerMinute || 0,
+        maxConcurrentRequests: config.maxConcurrentRequests || 0,
+        enableSummary: config.enableSummary,
+        summaryMessageCountThreshold: config.summaryMessageCountThreshold
+      },
+      note: "Operit 原生模型有限量，请在 Operit 设置中查看具体配额"
+    };
+  }
+  catch (error) {
+    return {
+      success: false,
+      error: error && error.message ? error.message : String(error)
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 核心：aihub_task 智能任务编排
+// 1. 用编排 agent（deepseek_v41_flash 深度思考）拆解总任务 → 每个子任务分配给哪个 agent
+// 2. 每个 agent 在自己的独立会话执行子任务（不污染当前会话）
+// 3. 全部完成后，用编排 agent 汇总各结果 → 一份最终交付
+// ---------------------------------------------------------------------------
+
+var ORCHESTRATOR_AGENT = "deepseek_v41_flash"; // 深度思考者做编排
+
+function buildAgentCatalogText() {
+  return AGENTS.map(function (a) {
+    return "- " + a.id + "（" + a.displayName + "）：" + a.description + "。人设：" + a.persona;
+  }).join("\n");
+}
+
+async function askAgentRaw(agentId, prompt) {
+  // 复用 askAgent 但强制独立会话
+  return await askAgent(agentId, prompt, "");
+}
+
+async function aihub_task(params) {
+  try {
+    var task = asText(params && params.task).trim();
+    if (!task) {
+      return { success: false, error: "缺少参数 task" };
+    }
+    var mode = asText(params && params.mode).trim() || "auto";
+    var restrictedAgents = params && params.agents && Array.isArray(params.agents) ? params.agents : null;
+
+    // 候选 agent（受限或全部）
+    var candidates = AGENTS.map(function (a) { return a.id; });
+    if (restrictedAgents && restrictedAgents.length > 0) {
+      candidates = restrictedAgents;
+    }
+
+    var catalog = buildAgentCatalogText();
+
+    // ---------- 计划生成（plan） ----------
+    // mode=execute 时直接使用传入 plan；否则让编排 agent 拆解
+    var planJson = null;
+    var planValid = false;
+    var fallbackUsed = false;
+    var planGeneratedAt = Date.now();
+
+    if (mode === "execute") {
+      var givenPlan = params && params.plan && Array.isArray(params.plan) ? params.plan : null;
+      if (givenPlan && givenPlan.length > 0 && !hasPlaceholderPlan(givenPlan)) {
+        planJson = givenPlan;
+        planValid = true;
+      }
+      else {
+        return { success: false, step: "plan", error: "mode=execute 需要传入有效的 plan 数组" };
+      }
+    }
+    else {
+      // 第 1 步：编排 agent 拆解任务（只让它做规划，不做执行）
+      var planPrompt = "你是 AIHub 任务编排器。把下面的总任务拆解成 1-3 个子任务，并为每个子任务指派最合适的 agent。\n\n" +
+        "可用 agent 清单（只能从中选）：\n" + catalog + "\n\n" +
+        "总任务：\n" + task + "\n\n" +
+        "只输出一个 JSON 数组，格式：\n" +
+        '[{"agent":"deepseek_v4_flash","subtask":"具体子任务描述","reason":"派给它的理由"}]\n\n' +
+        "硬性要求：\n" +
+        "1. agent 必须真实存在，subtask 必须是你实际写出的具体内容，禁止尖括号占位符（如 <agent_id>）。\n" +
+        "2. 只输出 JSON，前后不要任何解释文字、不要 markdown 代码块标记。\n" +
+        "3. 简单任务 1 个子任务即可，复杂任务最多 3 个。";
+
+      var planResult = await askAgentRaw(ORCHESTRATOR_AGENT, planPrompt);
+
+      // 解析编排 JSON（宽松：提取 [] 内 JSON）
+      if (planResult.success) {
+        planJson = extractJsonArray(planResult.reply);
+        planValid = Array.isArray(planJson) && planJson.length > 0 && !hasPlaceholderPlan(planJson);
+      }
+
+      // 编排失败/占位符 → 规则降级分配：直接把任务分给前 3 个候选 agent，各自独立完成
+      if (!planValid) {
+        fallbackUsed = true;
+        planJson = buildFallbackPlan(candidates, task);
+        planValid = true;
+      }
+    }
+
+    // mode=plan：只返回计划，不执行
+    if (mode === "plan") {
+      return {
+        success: true,
+        mode: "plan",
+        task: task,
+        plan: planJson,
+        fallbackUsed: fallbackUsed,
+        note: "计划已生成，确认后请用 mode=execute 传入 plan 执行（或直接 mode=auto 一步到位）"
+      };
+    }
+
+    var planStartedAt = Date.now();
+
+    // 第 2 步：各 agent 独立会话执行子任务
+    // 同一 agent 的子任务串行（避免同一专属会话并发错配），不同 agent 之间并行（显著提速）
+    var planItems = [];
+    for (var i = 0; i < planJson.length; i++) {
+      var item = planJson[i];
+      var agentId = asText(item.agent).trim();
+      var subtask = asText(item.subtask).trim();
+      // 校验 agent 合法
+      var valid = false;
+      for (var j = 0; j < candidates.length; j++) {
+        if (candidates[j] === agentId) {
+          valid = true;
+          break;
+        }
+      }
+      if (!valid) {
+        agentId = candidates[0] || ORCHESTRATOR_AGENT; // 兜底
+      }
+      planItems.push({ agent: agentId, subtask: subtask, reason: asText(item.reason).trim() });
+    }
+
+    var groups = {};
+    for (var g = 0; g < planItems.length; g++) {
+      var gid = planItems[g].agent;
+      if (!groups[gid]) {
+        groups[gid] = [];
+      }
+      groups[gid].push(planItems[g]);
+    }
+
+    var execStartedAt = Date.now();
+    var groupKeys = Object.keys(groups);
+    var groupResults = await Promise.all(groupKeys.map(function (key) {
+      return (async function () {
+        var list = [];
+        for (var m = 0; m < groups[key].length; m++) {
+          var it = groups[key][m];
+          var execResult = await askAgentRaw(it.agent, "请完成以下子任务：\n" + it.subtask + "\n\n（这是整体任务的一部分，请给出可直接交付的结果。）");
+          list.push({
+            agent: it.agent,
+            subtask: it.subtask,
+            reason: it.reason,
+            success: execResult.success,
+            reply: execResult.reply || "",
+            error: execResult.error || "",
+            elapsedMs: execResult.elapsedMs || 0,
+            chatId: execResult.chatId || ""
+          });
+        }
+        return list;
+      })();
+    }));
+
+    var executions = [];
+    for (var r = 0; r < groupResults.length; r++) {
+      executions = executions.concat(groupResults[r]);
+    }
+    var execWallMs = Date.now() - execStartedAt;
+
+    // 第 3 步：汇总（用编排 agent 整合各结果成一份交付）
+    // 优化：单子任务且成功 → 直接交付，跳过汇总（省一次模型调用，简单任务更快）
+    var parts = executions.map(function (e, idx) {
+      return "【子任务" + (idx + 1) + "｜" + e.agent + "】" + e.subtask + "\n结果：" + (e.success ? e.reply : "（失败：" + e.error + "）");
+    }).join("\n\n");
+
+    var summarySkipped = false;
+    var summaryResult = null;
+    var finalOutput = "";
+    if (executions.length === 1 && executions[0].success) {
+      summarySkipped = true;
+      finalOutput = executions[0].reply;
+    }
+    else {
+      var summaryPrompt = "你是 AIHub 最终汇总器。下面是一个总任务被拆解后，各个 agent 独立完成的结果。请把它们整合成一份完整、连贯、可直接交付的最终答案（按逻辑组织，去掉重复，补上缺失的衔接）。\n\n" +
+        "总任务：\n" + task + "\n\n" +
+        "各子任务结果：\n" + parts;
+
+      summaryResult = await askAgentRaw(ORCHESTRATOR_AGENT, summaryPrompt);
+      finalOutput = summaryResult.success ? summaryResult.reply : (parts);
+    }
+
+    return {
+      success: summarySkipped || (summaryResult && summaryResult.success),
+      mode: mode,
+      task: task,
+      plan: planJson,
+      fallbackUsed: fallbackUsed,
+      executions: executions,
+      finalResult: finalOutput,
+      summarySkipped: summarySkipped,
+      elapsedMs: Date.now() - planStartedAt,
+      execWallMs: execWallMs,
+      note: "各 agent 均在独立会话中执行，未污染当前会话" + (fallbackUsed ? "；编排 agent 未按格式规划，已自动降级分配" : "") + (summarySkipped ? "；单子任务直接交付，已跳过汇总" : "")
+    };
+  }
+  catch (error) {
+    return {
+      success: false,
+      error: error && error.message ? error.message : String(error)
+    };
+  }
+}
+
+function hasPlaceholderPlan(plan) {
+  for (var i = 0; i < plan.length; i++) {
+    var item = plan[i] || {};
+    var agent = asText(item.agent).trim();
+    var subtask = asText(item.subtask).trim();
+    if (!agent || agent.indexOf("<") >= 0 || agent.indexOf("agent_id") >= 0) {
+      return true;
+    }
+    if (!subtask || subtask.indexOf("<") >= 0 || subtask.indexOf("子任务描述") >= 0 || subtask.indexOf("agent_id") >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function buildFallbackPlan(candidates, task) {
+  var pool = candidates.filter(function (id) { return id !== ORCHESTRATOR_AGENT; });
+  if (pool.length === 0) {
+    pool = candidates.slice();
+  }
+  var selected = pool.slice(0, 3);
+  var plans = selected.map(function (id, idx) {
+    var agent = null;
+    for (var i = 0; i < AGENTS.length; i++) {
+      if (AGENTS[i].id === id) {
+        agent = AGENTS[i];
+        break;
+      }
+    }
+    var angle = agent ? agent.description : "从你的专业角度";
+    return {
+      agent: id,
+      subtask: "请以「" + angle + "」的身份视角，针对以下总任务给出你这一角色的完整方案与建议（要具体、可交付）：\n" + task,
+      reason: "编排降级：规则分配第 " + (idx + 1) + " 位"
+    };
+  });
+  return plans;
+}
+
+function extractJsonArray(text) {
+  var raw = asText(text).trim();
+  // 尝试整体解析
+  try {
+    var parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed;
+    }
+  }
+  catch (error) {
+    // 继续
+  }
+  // 宽松：找第一个 [ 到最后一个 ]
+  var start = raw.indexOf("[");
+  var end = raw.lastIndexOf("]");
+  if (start >= 0 && end > start) {
+    var slice = raw.slice(start, end + 1);
+    try {
+      var arr = JSON.parse(slice);
+      if (Array.isArray(arr)) {
+        return arr;
+      }
+    }
+    catch (error2) {
+      return null;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// exports（METADATA 同步铁律：新增工具必须补 METADATA + exports）
+// ---------------------------------------------------------------------------
+
+var agentSwarmTools = {
+  aihub_advice: aihub_advice,
+  aihub_setup: aihub_setup,
+  aihub_ask: aihub_ask,
+  aihub_broadcast: aihub_broadcast,
+  aihub_status: aihub_status,
+  aihub_quota: aihub_quota,
+  aihub_task: aihub_task
+};
+
+function aihub_advice(params) {
+  return {
+    advice: "AIHub 使用建议：\n- 用 aihub_ask 让单个 agent 回答；用 aihub_broadcast 让多个 agent 同时回答。\n- agent 可选：deepseek_v4_flash / deepseek_v41_flash / glm_5_2 / kimi_k3 / sensenova_lite。\n- 每个 agent 有独立人设（快枪手/深度思考/稳重长文/创意灵感/轻快闲聊）。\n- 首次使用前先 aihub_setup 自动建角色卡。"
+  };
+}
+
+exports.aihub_advice = agentSwarmTools.aihub_advice;
+exports.aihub_setup = agentSwarmTools.aihub_setup;
+exports.aihub_ask = agentSwarmTools.aihub_ask;
+exports.aihub_broadcast = agentSwarmTools.aihub_broadcast;
+exports.aihub_status = agentSwarmTools.aihub_status;
+exports.aihub_quota = agentSwarmTools.aihub_quota;
+exports.aihub_task = agentSwarmTools.aihub_task;
