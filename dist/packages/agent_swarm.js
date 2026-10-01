@@ -142,13 +142,25 @@
     {
       "name": "aihub_weblogin",
       "description": {
-        "zh": "网页版 agent 登录管理：aihub_weblogin({}) 打开 DeepSeek 网页浏览器浮窗供手动登录；aihub_weblogin({save: true}) 保存当前浏览器会话的登录 cookie，之后网页版 DeepSeek agent（deepseek_web）即可自动使用。",
-        "en": "Web-agent login manager: aihub_weblogin({}) opens the DeepSeek web page in a browser floating window for manual login; aihub_weblogin({save: true}) saves the browser session cookies so the web DeepSeek agent (deepseek_web) can be used automatically."
+        "zh": "网页版 agent 登录管理：aihub_weblogin({}) 打开 DeepSeek 网页浏览器浮窗供手动登录；aihub_weblogin({account, password}) 自动填账号密码走密码登录；aihub_weblogin({save: true}) 保存当前浏览器会话的登录 cookie，之后网页版 DeepSeek agent（deepseek_web）即可自动使用。",
+        "en": "Web-agent login manager: aihub_weblogin({}) opens the DeepSeek web page in a browser floating window for manual login; aihub_weblogin({account, password}) auto-fills account/password for password login; aihub_weblogin({save: true}) saves the browser session cookies so the web DeepSeek agent (deepseek_web) can be used automatically."
       },
       "parameters": [
         {
           "name": "agent",
           "description": { "zh": "可选，网页版 agent id（默认 deepseek_web）", "en": "Optional; web agent id (default deepseek_web)" },
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "description": { "zh": "可选，DeepSeek 登录账号（邮箱/手机号），与 password 一起走密码登录", "en": "Optional; DeepSeek account (email/phone) for password login, used with password" },
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "password",
+          "description": { "zh": "可选，DeepSeek 登录密码，与 account 一起走密码登录", "en": "Optional; DeepSeek password for password login, used with account" },
           "type": "string",
           "required": false
         },
@@ -590,7 +602,9 @@ function sleepMs(ms) {
 
 // ---------------------------------------------------------------------------
 // 网页版 agent（DeepSeek 网页）：浏览器会话 + cookie 登录 + DOM 自动化
-// 复用 Tools.Network.browser* 全家桶；cookie 持久化到软件设置变量
+// 复用 Tools.Net.browser* 全家桶（注意：命名空间是 Tools.Net，不是 Tools.Network！
+// 且运行时没有 startBrowser，浏览器会话是系统内置常驻的，直接 browserNavigate 即可）
+// cookie 持久化到软件设置变量
 // ---------------------------------------------------------------------------
 
 var WEB_COOKIE_ENV = "AIHUB_WEB_DS_COOKIE"; // 存储 DeepSeek 网页登录 cookie（JSON 字符串）
@@ -615,37 +629,19 @@ function browserOk(raw) {
   return !!parsed.ok || !!parsed.success || !parsed.error;
 }
 
-// 启动（或复用）DeepSeek 网页浏览器会话
+// 打开（或复用）DeepSeek 网页浏览器会话：系统内置常驻会话，直接导航即可
 async function ensureWebSession(agent) {
   var sessionName = agent.webSession || "aihub_ds_web";
-  // startBrowser 支持 session_name：同名单例会复用已有会话，而不是新开
   try {
-    var startRaw = await Tools.Network.startBrowser({ url: agent.webUrl, session_name: sessionName });
-    var start = parseBrowserResult(startRaw);
-    if (browserOk(startRaw)) {
+    var navRaw = await Tools.Net.browserNavigate({ url: agent.webUrl });
+    var nav = parseBrowserResult(navRaw);
+    if (browserOk(navRaw) || nav.url || nav.title || (typeof navRaw === "string" && navRaw.indexOf("Navigated") >= 0)) {
       return { ok: true, session: sessionName };
     }
-    // 失败：若提示会话已存在，直接复用；否则报错
-    var errText = asText(start.error || startRaw);
-    if (errText.indexOf("exist") >= 0 || errText.indexOf("already") >= 0 || errText.indexOf("复用") >= 0) {
-      return { ok: true, session: sessionName };
-    }
-    return { ok: false, error: errText || "启动浏览器失败" };
+    return { ok: false, error: asText(nav.error || navRaw || "导航失败") };
   }
   catch (error) {
-    var errMsg = error && error.message ? error.message : String(error);
-    // 抛错也可能是"会话已存在"类，尝试导航验证会话可用
-    try {
-      var navRaw = await Tools.Network.browserNavigate({ url: agent.webUrl });
-      var nav = parseBrowserResult(navRaw);
-      if (browserOk(navRaw) || nav.url || nav.title) {
-        return { ok: true, session: sessionName };
-      }
-    }
-    catch (error2) {
-      // 忽略
-    }
-    return { ok: false, error: "浏览器会话不可用: " + errMsg };
+    return { ok: false, error: "浏览器会话不可用: " + (error && error.message ? error.message : String(error)) };
   }
 }
 
@@ -661,7 +657,7 @@ async function applyWebCookies(agent) {
       return { ok: false, error: "cookie 数据格式错误，请重新 aihub_weblogin" };
     }
     // 注入到浏览器（cookies.set 支持 domain + 字符串/对象）
-    var setRaw = await Tools.Network.cookies.set(agent.webDomain, cookies);
+    var setRaw = await Tools.Net.cookies.set(agent.webDomain, cookies);
     if (!browserOk(setRaw)) {
       return { ok: false, error: "注入 cookie 失败，请重新 aihub_weblogin" };
     }
@@ -675,7 +671,7 @@ async function applyWebCookies(agent) {
 // 检查当前是否已登录（页面出现输入框 = 已登录）
 async function checkWebLogin(agent) {
   try {
-    var snapRaw = await Tools.Network.browserSnapshot({});
+    var snapRaw = await Tools.Net.browserSnapshot({});
     var snap = parseBrowserResult(snapRaw);
     var text = asText(snap.text || snap.content || snap.snapshot || "");
     // DeepSeek 聊天页有输入框 placeholder 或 textarea；登录页会出现"登录/手机号/验证码"
@@ -702,7 +698,7 @@ async function waitReplyDone(agent, waitMs) {
   var deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
     try {
-      var snapRaw = await Tools.Network.browserSnapshot({});
+      var snapRaw = await Tools.Net.browserSnapshot({});
       var snap = parseBrowserResult(snapRaw);
       var text = asText(snap.text || snap.content || snap.snapshot || "");
       // 停止生成按钮消失 = 回复完成
@@ -763,7 +759,7 @@ async function askWebAgent(agent, prompt) {
     }
     // 3. 刷新页面（cookie 注入后刷新生效）
     try {
-      await Tools.Network.browserNavigate({ url: agent.webUrl });
+      await Tools.Net.browserNavigate({ url: agent.webUrl });
     }
     catch (error) {
       // 忽略
@@ -778,11 +774,11 @@ async function askWebAgent(agent, prompt) {
     var typed = false;
     try {
       // 用 browserType 需要 ref；尝试 snapshot 拿 ref
-      var snapRaw = await Tools.Network.browserSnapshot({});
+      var snapRaw = await Tools.Net.browserSnapshot({});
       var snap = parseBrowserResult(snapRaw);
       var ref = snap.ref || (snap.elements && snap.elements[0] && snap.elements[0].ref) || "";
       if (ref) {
-        await Tools.Network.browserType({ ref: ref, text: prompt, submit: true });
+        await Tools.Net.browserType({ ref: ref, text: prompt, submit: true });
         typed = true;
       }
     }
@@ -792,7 +788,7 @@ async function askWebAgent(agent, prompt) {
     if (!typed) {
       // 退路：browserRunCode 执行 DOM 输入 + 回车
       var code = "(()=>{const ta=document.querySelector('textarea')||document.querySelector('[contenteditable=\"true\"]')||document.querySelector('input[type=\"text\"]');if(!ta)return 'NO_INPUT';ta.focus();const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');if(setter&&setter.set)setter.set.call(ta," + JSON.stringify(prompt) + ");else ta.value=" + JSON.stringify(prompt) + ";ta.dispatchEvent(new Event('input',{bubbles:true}));ta.dispatchEvent(new Event('change',{bubbles:true}));const ev=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true});ta.dispatchEvent(ev);return 'SENT';})()";
-      var runRaw = await Tools.Network.browserRunCode({ code: code });
+      var runRaw = await Tools.Net.browserRunCode({ code: code });
       var run = parseBrowserResult(runRaw);
       var runResult = asText(run.result || run.output || run.data || runRaw);
       if (runResult.indexOf("NO_INPUT") >= 0) {
@@ -817,7 +813,7 @@ async function askWebAgent(agent, prompt) {
     if (!reply) {
       // 再等几秒重抓一次
       await sleepMs(5000);
-      var snapRaw2 = await Tools.Network.browserSnapshot({});
+      var snapRaw2 = await Tools.Net.browserSnapshot({});
       var snap2 = parseBrowserResult(snapRaw2);
       reply = extractLastReply(asText(snap2.text || snap2.content || snap2.snapshot || ""));
     }
@@ -839,7 +835,11 @@ async function askWebAgent(agent, prompt) {
 }
 
 // aihub_weblogin：打开 DeepSeek 网页让用户手动登录，并把 cookie 存起来
-async function webLogin(agentId) {
+// 支持三种模式：
+//  1) webLogin(agentId) — 只打开登录页，用户手动登录
+//  2) webLogin(agentId, account, password) — 自动填账号密码走"密码登录"
+//  3) saveWebCookies(agentId) — 登录成功后保存 cookie
+async function webLogin(agentId, account, password) {
   var agent = null;
   for (var i = 0; i < AGENTS.length; i++) {
     if (AGENTS[i].id === agentId || (AGENTS[i].web && !agentId)) {
@@ -856,17 +856,86 @@ async function webLogin(agentId) {
   }
   // 打开登录页
   try {
-    await Tools.Network.browserNavigate({ url: agent.webUrl });
+    await Tools.Net.browserNavigate({ url: agent.webUrl });
   }
   catch (error) {
     // 忽略
   }
+  await sleepMs(2000);
+
+  // 若提供了账号密码：自动走"密码登录"
+  if (account && password) {
+    try {
+      // 1. 点"密码登录"切换表单
+      var snapRaw = await Tools.Net.browserSnapshot({});
+      var snap = parseBrowserResult(snapRaw);
+      var text = asText(snap.text || snap.content || snap.snapshot || "");
+      var pwdBtnRef = "";
+      // 找"密码登录"按钮 ref（e9 是探测值，实际可能变化，从快照里找）
+      var m = text.match(/button "密码登录" \[ref=([^\]]+)\]/);
+      if (m) {
+        pwdBtnRef = m[1];
+        await Tools.Net.browserClick({ ref: pwdBtnRef });
+        await sleepMs(1500);
+      }
+      // 2. 重新快照，找账号/密码输入框
+      var snapRaw2 = await Tools.Net.browserSnapshot({});
+      var snap2 = parseBrowserResult(snapRaw2);
+      var text2 = asText(snap2.text || snap2.content || snap2.snapshot || "");
+      // 找账号输入框（"邮箱/手机号"或"账号"）和密码框（"密码"）
+      var accountRef = "";
+      var pwdRef = "";
+      var accM = text2.match(/textbox "([^"]*账号[^"]*)" \[ref=([^\]]+)\]/) || text2.match(/textbox "([^"]*邮箱[^"]*)" \[ref=([^\]]+)\]/) || text2.match(/textbox "([^"]*手机号[^"]*)" \[ref=([^\]]+)\]/);
+      if (accM) {
+        accountRef = accM[2];
+      }
+      var pwdM = text2.match(/textbox "([^"]*密码[^"]*)" \[ref=([^\]]+)\]/);
+      if (pwdM) {
+        pwdRef = pwdM[2];
+      }
+      if (accountRef) {
+        await Tools.Net.browserType({ ref: accountRef, text: account });
+        await sleepMs(500);
+      }
+      if (pwdRef) {
+        await Tools.Net.browserType({ ref: pwdRef, text: password });
+        await sleepMs(500);
+      }
+      // 3. 点"登录"按钮
+      var snapRaw3 = await Tools.Net.browserSnapshot({});
+      var snap3 = parseBrowserResult(snapRaw3);
+      var text3 = asText(snap3.text || snap3.content || snap3.snapshot || "");
+      var loginM = text3.match(/button "登录" \[ref=([^\]]+)\]/);
+      if (loginM) {
+        await Tools.Net.browserClick({ ref: loginM[1] });
+      }
+      await sleepMs(4000);
+      return {
+        success: true,
+        agent: agent.id,
+        displayName: agent.displayName,
+        webUrl: agent.webUrl,
+        autoLogin: true,
+        message: "已自动填入账号密码并点击登录。若登录成功，请在浏览器浮窗确认后点「保存登录」；若出现验证码/滑块，请在浏览器浮窗中手动完成。",
+        session: agent.webSession
+      };
+    }
+    catch (error) {
+      return {
+        success: false,
+        agent: agent.id,
+        error: "自动登录失败: " + (error && error.message ? error.message : String(error)) + "。可手动在浏览器浮窗中登录，然后点「保存登录」。"
+      };
+    }
+  }
+
+  // 无账号密码：纯手动模式
   return {
     success: true,
     agent: agent.id,
     displayName: agent.displayName,
     webUrl: agent.webUrl,
-    message: "已打开 " + agent.webUrl + "。请在浏览器浮窗中登录 DeepSeek（扫码或手机号+验证码）。登录完成后，到 AIHub 协作台点「保存登录状态」或直接再调用 aihub_weblogin 的 save=true 参数来保存 cookie。",
+    message: "已打开 " + agent.webUrl + "。请在浏览器浮窗中登录 DeepSeek（扫码或手机号+验证码，或点「密码登录」用账号密码）。登录完成后，到 AIHub 协作台点「保存登录」保存 cookie。",
     session: agent.webSession
   };
 }
@@ -884,7 +953,7 @@ async function saveWebCookies(agentId) {
     return { success: false, error: "该 agent 不是网页版" };
   }
   try {
-    var ckRaw = await Tools.Network.cookies.get(agent.webDomain);
+    var ckRaw = await Tools.Net.cookies.get(agent.webDomain);
     var ck = parseBrowserResult(ckRaw);
     // cookies.get 返回可能是 {cookies:[...]} 或 {data:[...]} 或直接数组
     var cookies = ck.cookies || ck.data || ck.result || ck;
@@ -1183,7 +1252,8 @@ async function aihub_quota(params) {
 
 // aihub_weblogin：网页版 agent（DeepSeek 网页）登录管理
 // 用法1：aihub_weblogin({}) 打开 DeepSeek 网页浏览器浮窗，用户手动登录
-// 用法2：aihub_weblogin({save: true}) 把当前浏览器会话的登录 cookie 保存到本地
+// 用法2：aihub_weblogin({account, password}) 自动填账号密码走密码登录
+// 用法3：aihub_weblogin({save: true}) 把当前浏览器会话的登录 cookie 保存到本地
 async function aihub_weblogin(params) {
   try {
     var agentId = asText(params && params.agent).trim();
@@ -1191,7 +1261,9 @@ async function aihub_weblogin(params) {
     if (save) {
       return await saveWebCookies(agentId);
     }
-    return await webLogin(agentId);
+    var account = asText(params && params.account).trim();
+    var password = asText(params && params.password).trim();
+    return await webLogin(agentId, account, password);
   }
   catch (error) {
     return {
