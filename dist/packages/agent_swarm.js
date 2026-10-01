@@ -138,6 +138,27 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "aihub_weblogin",
+      "description": {
+        "zh": "网页版 agent 登录管理：aihub_weblogin({}) 打开 DeepSeek 网页浏览器浮窗供手动登录；aihub_weblogin({save: true}) 保存当前浏览器会话的登录 cookie，之后网页版 DeepSeek agent（deepseek_web）即可自动使用。",
+        "en": "Web-agent login manager: aihub_weblogin({}) opens the DeepSeek web page in a browser floating window for manual login; aihub_weblogin({save: true}) saves the browser session cookies so the web DeepSeek agent (deepseek_web) can be used automatically."
+      },
+      "parameters": [
+        {
+          "name": "agent",
+          "description": { "zh": "可选，网页版 agent id（默认 deepseek_web）", "en": "Optional; web agent id (default deepseek_web)" },
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "save",
+          "description": { "zh": "可选，true 时保存当前浏览器会话 cookie 到本地（登录完成后调用）", "en": "Optional; when true, save current browser session cookies locally (call after login)" },
+          "type": "boolean",
+          "required": false
+        }
+      ]
     }
   ]
 }
@@ -189,6 +210,18 @@ var AGENTS = [
     persona: "你是『轻快的伙伴』，擅长日常闲聊、轻松问答、简洁回复。语气亲切自然，回答简短有温度。",
     color: "#81C784",
     description: "轻快闲聊助手"
+  },
+  {
+    id: "deepseek_web",
+    modelName: "",
+    displayName: "DeepSeek 网页版",
+    persona: "你是 DeepSeek 网页版智能助手，直接给出高质量、完整的回答。",
+    color: "#90A4AE",
+    description: "网页版 DeepSeek（浏览器自动化）",
+    web: true,
+    webUrl: "https://chat.deepseek.com",
+    webDomain: "chat.deepseek.com",
+    webSession: "aihub_ds_web"
   }
 ];
 
@@ -361,6 +394,38 @@ async function setupAllAgents() {
 
   for (var i = 0; i < AGENTS.length; i++) {
     var agent = AGENTS[i];
+
+    // 网页版 agent：无需模型配置/角色卡，检查 cookie 是否已保存
+    if (agent.web) {
+      var webReady = false;
+      try {
+        var savedCookieVal2 = await Tools.SoftwareSettings.readEnvironmentVariable(WEB_COOKIE_ENV);
+        webReady = !!asText(savedCookieVal2).trim();
+      }
+      catch (error) {
+        webReady = false;
+      }
+      results.push({
+        agent: agent.id,
+        displayName: agent.displayName,
+        modelName: "deepseek-web（浏览器）",
+        modelIndex: -1,
+        persona: agent.persona,
+        ready: webReady,
+        cardId: "",
+        created: false,
+        configId: "",
+        configName: "",
+        web: true,
+        webUrl: agent.webUrl,
+        reason: webReady ? "" : "未保存网页登录 cookie，请运行 aihub_weblogin 登录后保存"
+      });
+      if (webReady) {
+        readyCount += 1;
+      }
+      continue;
+    }
+
     var modelIndex = modelIndexOf(host.config, agent.modelName);
     if (modelIndex < 0) {
       results.push({
@@ -523,6 +588,317 @@ function sleepMs(ms) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 网页版 agent（DeepSeek 网页）：浏览器会话 + cookie 登录 + DOM 自动化
+// 复用 Tools.Network.browser* 全家桶；cookie 持久化到软件设置变量
+// ---------------------------------------------------------------------------
+
+var WEB_COOKIE_ENV = "AIHUB_WEB_DS_COOKIE"; // 存储 DeepSeek 网页登录 cookie（JSON 字符串）
+
+// 解析浏览器 API 返回的 JSON 字符串（有些返回 {ok, data}，有些直接是对象）
+function parseBrowserResult(raw) {
+  if (typeof raw === "object" && raw !== null) {
+    return raw;
+  }
+  try {
+    var parsed = JSON.parse(asText(raw));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  }
+  catch (error) {
+    return {};
+  }
+}
+
+function browserOk(raw) {
+  var parsed = parseBrowserResult(raw);
+  // 兼容 {ok:true} / {success:true} / {error:""} 等
+  return !!parsed.ok || !!parsed.success || !parsed.error;
+}
+
+// 启动（或复用）DeepSeek 网页浏览器会话
+async function ensureWebSession(agent) {
+  var sessionName = agent.webSession || "aihub_ds_web";
+  try {
+    // 先看有没有已存在的会话：导航到首页，若成功说明会话可用
+    var navRaw = await Tools.Network.browserNavigate({ url: agent.webUrl, session_name: sessionName });
+    var nav = parseBrowserResult(navRaw);
+    // browserNavigate 不一定支持 session_name，若失败则用 startBrowser
+    if (!browserOk(navRaw) && nav.error && asText(nav.error).indexOf("session") >= 0) {
+      var startRaw = await Tools.Network.startBrowser({ url: agent.webUrl, session_name: sessionName });
+      var start = parseBrowserResult(startRaw);
+      if (!browserOk(startRaw)) {
+        return { ok: false, error: asText(start.error || "启动浏览器失败") };
+      }
+    }
+    return { ok: true, session: sessionName };
+  }
+  catch (error) {
+    // 直接尝试启动
+    try {
+      var startRaw2 = await Tools.Network.startBrowser({ url: agent.webUrl, session_name: sessionName });
+      var start2 = parseBrowserResult(startRaw2);
+      if (!browserOk(startRaw2)) {
+        return { ok: false, error: asText(start2.error || "启动浏览器失败") };
+      }
+      return { ok: true, session: sessionName };
+    }
+    catch (error2) {
+      return { ok: false, error: "浏览器会话不可用: " + (error2 && error2.message ? error2.message : String(error2)) };
+    }
+  }
+}
+
+// 读取已保存的 cookie 并注入浏览器
+async function applyWebCookies(agent) {
+  try {
+    var saved = asText(await Tools.SoftwareSettings.readEnvironmentVariable(WEB_COOKIE_ENV)).trim();
+    if (!saved) {
+      return { ok: false, error: "未保存登录 cookie，请先运行 aihub_weblogin 登录 DeepSeek 网页版" };
+    }
+    var cookies = jsonParseSafe(saved);
+    if (!cookies) {
+      return { ok: false, error: "cookie 数据格式错误，请重新 aihub_weblogin" };
+    }
+    // 注入到浏览器（cookies.set 支持 domain + 字符串/对象）
+    var setRaw = await Tools.Network.cookies.set(agent.webDomain, cookies);
+    if (!browserOk(setRaw)) {
+      return { ok: false, error: "注入 cookie 失败，请重新 aihub_weblogin" };
+    }
+    return { ok: true };
+  }
+  catch (error) {
+    return { ok: false, error: "读取 cookie 失败: " + (error && error.message ? error.message : String(error)) };
+  }
+}
+
+// 检查当前是否已登录（页面出现输入框 = 已登录）
+async function checkWebLogin(agent) {
+  try {
+    var snapRaw = await Tools.Network.browserSnapshot({});
+    var snap = parseBrowserResult(snapRaw);
+    var text = asText(snap.text || snap.content || snap.snapshot || "");
+    // DeepSeek 聊天页有输入框 placeholder 或 textarea；登录页会出现"登录/手机号/验证码"
+    var loginWords = ["登录", "手机号", "验证码", "注册", "密码"];
+    var hasLogin = false;
+    for (var i = 0; i < loginWords.length; i++) {
+      if (text.indexOf(loginWords[i]) >= 0) {
+        hasLogin = true;
+        break;
+      }
+    }
+    // 有 textarea/输入框 = 已登录；只有登录词但没有输入框 = 未登录
+    var hasInput = text.indexOf("textarea") >= 0 || text.indexOf("输入消息") >= 0 || text.indexOf("给 DeepSeek 发送消息") >= 0 || text.indexOf("placeholder") >= 0;
+    var loggedIn = hasInput || (text.length > 0 && !hasLogin);
+    return { loggedIn: loggedIn, snapshot: text };
+  }
+  catch (error) {
+    return { loggedIn: false, error: "快照失败: " + (error && error.message ? error.message : String(error)) };
+  }
+}
+
+// 等待回复生成完成：DeepSeek 网页生成时底部有"停止生成"按钮，消失即完成
+async function waitReplyDone(agent, waitMs) {
+  var deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    try {
+      var snapRaw = await Tools.Network.browserSnapshot({});
+      var snap = parseBrowserResult(snapRaw);
+      var text = asText(snap.text || snap.content || snap.snapshot || "");
+      // 停止生成按钮消失 = 回复完成
+      if (text.indexOf("停止生成") < 0 && text.indexOf("Stop generating") < 0) {
+        return { done: true, snapshot: text };
+      }
+    }
+    catch (error) {
+      // 忽略
+    }
+    await sleepMs(3000);
+  }
+  return { done: false, snapshot: "" };
+}
+
+// 抓取最后一条 AI 回复（消息区最后一条非用户消息文本）
+function extractLastReply(snapshotText) {
+  // 快照文本是结构化列表。简单启发式：找"assistant/AI/DeepSeek"标记后的文本
+  // 若快照含完整消息列表，取最后一段
+  var text = asText(snapshotText);
+  if (!text.trim()) {
+    return "";
+  }
+  // 快照可能是 JSON 数组/对象字符串，尝试解析消息
+  try {
+    var parsed = jsonParseSafe(text);
+    if (Array.isArray(parsed)) {
+      // 找最后一个 role=assistant 的消息
+      for (var i = parsed.length - 1; i >= 0; i--) {
+        var m = parsed[i];
+        var role = asText(m.role || "").toLowerCase();
+        if (role === "assistant" || role === "ai") {
+          return asText(m.content || m.text || m.message || "");
+        }
+      }
+    }
+  }
+  catch (error) {
+    // 非 JSON，走文本启发式
+  }
+  // 文本启发式：去掉最后一段"用户消息"后的部分。这里简化：返回去掉最前面用户输入后的整段
+  return text.length > 500 ? text.slice(-500) : text;
+}
+
+// 网页 agent 提问：浏览器发消息 + 等回复完成 + 抓取回复
+async function askWebAgent(agent, prompt) {
+  var startedAt = Date.now();
+  try {
+    // 1. 确保会话
+    var sess = await ensureWebSession(agent);
+    if (!sess.ok) {
+      return { success: false, agent: agent.id, error: sess.error };
+    }
+    // 2. 注入 cookie
+    var ck = await applyWebCookies(agent);
+    if (!ck.ok) {
+      return { success: false, agent: agent.id, error: ck.error };
+    }
+    // 3. 刷新页面（cookie 注入后刷新生效）
+    try {
+      await Tools.Network.browserNavigate({ url: agent.webUrl });
+    }
+    catch (error) {
+      // 忽略
+    }
+    await sleepMs(4000);
+    // 4. 检查登录态
+    var login = await checkWebLogin(agent);
+    if (!login.loggedIn) {
+      return { success: false, agent: agent.id, error: "DeepSeek 网页未登录或登录已过期，请重新运行 aihub_weblogin" };
+    }
+    // 5. 找到输入框并输入（textarea / 输入框）
+    var typed = false;
+    try {
+      // 用 browserType 需要 ref；尝试 snapshot 拿 ref
+      var snapRaw = await Tools.Network.browserSnapshot({});
+      var snap = parseBrowserResult(snapRaw);
+      var ref = snap.ref || (snap.elements && snap.elements[0] && snap.elements[0].ref) || "";
+      if (ref) {
+        await Tools.Network.browserType({ ref: ref, text: prompt, submit: true });
+        typed = true;
+      }
+    }
+    catch (error) {
+      typed = false;
+    }
+    if (!typed) {
+      // 退路：browserRunCode 执行 DOM 输入 + 回车
+      var code = "(()=>{const ta=document.querySelector('textarea')||document.querySelector('[contenteditable=\"true\"]')||document.querySelector('input[type=\"text\"]');if(!ta)return 'NO_INPUT';ta.focus();const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');if(setter&&setter.set)setter.set.call(ta," + JSON.stringify(prompt) + ");else ta.value=" + JSON.stringify(prompt) + ";ta.dispatchEvent(new Event('input',{bubbles:true}));ta.dispatchEvent(new Event('change',{bubbles:true}));const ev=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true});ta.dispatchEvent(ev);return 'SENT';})()";
+      var runRaw = await Tools.Network.browserRunCode({ code: code });
+      var run = parseBrowserResult(runRaw);
+      var runResult = asText(run.result || run.output || run.data || runRaw);
+      if (runResult.indexOf("NO_INPUT") >= 0) {
+        return { success: false, agent: agent.id, error: "未找到 DeepSeek 输入框（页面结构可能变化）" };
+      }
+      typed = true;
+    }
+    // 6. 等回复完成（最多 90s）
+    var done = await waitReplyDone(agent, 90000);
+    if (!done.done) {
+      return {
+        success: true, // 已发送，回复可能还在生成，标记为"后台生成中"
+        agent: agent.id,
+        reply: "",
+        sent: true,
+        elapsedMs: Date.now() - startedAt,
+        note: "消息已发送到 DeepSeek 网页，回复生成较慢，可在浏览器会话中查看"
+      };
+    }
+    // 7. 抓取回复
+    var reply = extractLastReply(done.snapshot);
+    if (!reply) {
+      // 再等几秒重抓一次
+      await sleepMs(5000);
+      var snapRaw2 = await Tools.Network.browserSnapshot({});
+      var snap2 = parseBrowserResult(snapRaw2);
+      reply = extractLastReply(asText(snap2.text || snap2.content || snap2.snapshot || ""));
+    }
+    return {
+      success: !!reply,
+      agent: agent.id,
+      reply: reply,
+      sent: !!reply || true,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+  catch (error) {
+    return {
+      success: false,
+      agent: agent.id,
+      error: "DeepSeek 网页自动化失败: " + (error && error.message ? error.message : String(error))
+    };
+  }
+}
+
+// aihub_weblogin：打开 DeepSeek 网页让用户手动登录，并把 cookie 存起来
+async function webLogin(agentId) {
+  var agent = null;
+  for (var i = 0; i < AGENTS.length; i++) {
+    if (AGENTS[i].id === agentId || (AGENTS[i].web && !agentId)) {
+      agent = AGENTS[i];
+      break;
+    }
+  }
+  if (!agent || !agent.web) {
+    return { success: false, error: "该 agent 不是网页版，无需登录" };
+  }
+  var sess = await ensureWebSession(agent);
+  if (!sess.ok) {
+    return { success: false, error: sess.error };
+  }
+  // 打开登录页
+  try {
+    await Tools.Network.browserNavigate({ url: agent.webUrl });
+  }
+  catch (error) {
+    // 忽略
+  }
+  return {
+    success: true,
+    agent: agent.id,
+    displayName: agent.displayName,
+    message: "已打开 " + agent.webUrl + "。请在浏览器浮窗中登录 DeepSeek（扫码或手机号+验证码）。登录完成后，到 AIHub 协作台点「保存登录状态」或直接再调用 aihub_weblogin 的 save=true 参数来保存 cookie。",
+    session: agent.webSession
+  };
+}
+
+// 保存当前浏览器会话的 cookie（登录后调用）
+async function saveWebCookies(agentId) {
+  var agent = null;
+  for (var i = 0; i < AGENTS.length; i++) {
+    if (AGENTS[i].id === agentId || (AGENTS[i].web && !agentId)) {
+      agent = AGENTS[i];
+      break;
+    }
+  }
+  if (!agent || !agent.web) {
+    return { success: false, error: "该 agent 不是网页版" };
+  }
+  try {
+    var ckRaw = await Tools.Network.cookies.get(agent.webDomain);
+    var ck = parseBrowserResult(ckRaw);
+    // cookies.get 返回可能是 {cookies:[...]} 或 {data:[...]} 或直接数组
+    var cookies = ck.cookies || ck.data || ck.result || ck;
+    if (Array.isArray(cookies)) {
+      await Tools.SoftwareSettings.writeEnvironmentVariable(WEB_COOKIE_ENV, JSON.stringify(cookies));
+      return { success: true, agent: agent.id, cookieCount: cookies.length, message: "已保存 " + cookies.length + " 条 cookie，DeepSeek 网页 agent 可用了" };
+    }
+    // 可能是对象形式
+    await Tools.SoftwareSettings.writeEnvironmentVariable(WEB_COOKIE_ENV, JSON.stringify(cookies));
+    return { success: true, agent: agent.id, cookieCount: Object.keys(cookies).length, message: "已保存 cookie，DeepSeek 网页 agent 可用了" };
+  }
+  catch (error) {
+    return { success: false, error: "保存 cookie 失败: " + (error && error.message ? error.message : String(error)) };
+  }
+}
+
 async function askAgent(agentId, prompt, context) {
   var agent = null;
   for (var i = 0; i < AGENTS.length; i++) {
@@ -536,6 +912,15 @@ async function askAgent(agentId, prompt, context) {
       success: false,
       error: "未知 agent: " + agentId + "，可选: " + AGENTS.map(function (a) { return a.id; }).join(", ")
     };
+  }
+
+  // 网页版 agent：走浏览器自动化（不经过 Operit 模型配置）
+  if (agent.web) {
+    var webResult = await askWebAgent(agent, (context && asText(context).trim() ? "【附加上下文】\n" + asText(context).trim() + "\n\n【任务】\n" : "") + asText(prompt).trim());
+    webResult.displayName = agent.displayName;
+    webResult.persona = agent.persona;
+    webResult.modelName = "deepseek-web（浏览器）";
+    return webResult;
   }
 
   var host = await discoverHostConfig();
@@ -696,7 +1081,37 @@ async function aihub_status(params) {
     }
     var cards = await listCharacterCards();
     var agents = [];
-    AGENTS.forEach(function (agent) {
+    for (var ai = 0; ai < AGENTS.length; ai++) {
+      var agent = AGENTS[ai];
+      // 网页版 agent：不依赖模型配置，检查 cookie
+      if (agent.web) {
+        var webReady = false;
+        var webReason = "未保存网页登录 cookie，请运行 aihub_weblogin 登录后保存";
+        try {
+          var savedCookieVal = await Tools.SoftwareSettings.readEnvironmentVariable(WEB_COOKIE_ENV);
+          webReady = !!asText(savedCookieVal).trim();
+          if (webReady) {
+            webReason = "";
+          }
+        }
+        catch (error) {
+          webReady = false;
+        }
+        agents.push({
+          agent: agent.id,
+          displayName: agent.displayName,
+          modelName: "deepseek-web（浏览器）",
+          modelIndex: -1,
+          persona: agent.persona,
+          cardBound: false,
+          cardId: "",
+          ready: webReady,
+          web: true,
+          webUrl: agent.webUrl,
+          reason: webReason
+        });
+        continue;
+      }
       var modelIndex = modelIndexOf(host.config, agent.modelName);
       var card = null;
       for (var i = 0; i < cards.length; i++) {
@@ -715,7 +1130,7 @@ async function aihub_status(params) {
         cardId: card ? asText(card.id) : "",
         ready: modelIndex >= 0 && !!card
       });
-    });
+    }
     return {
       success: true,
       hostConfigId: host.config.id,
@@ -764,6 +1179,26 @@ async function aihub_quota(params) {
   }
 }
 
+// aihub_weblogin：网页版 agent（DeepSeek 网页）登录管理
+// 用法1：aihub_weblogin({}) 打开 DeepSeek 网页浏览器浮窗，用户手动登录
+// 用法2：aihub_weblogin({save: true}) 把当前浏览器会话的登录 cookie 保存到本地
+async function aihub_weblogin(params) {
+  try {
+    var agentId = asText(params && params.agent).trim();
+    var save = !!(params && params.save);
+    if (save) {
+      return await saveWebCookies(agentId);
+    }
+    return await webLogin(agentId);
+  }
+  catch (error) {
+    return {
+      success: false,
+      error: error && error.message ? error.message : String(error)
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 核心：aihub_task 智能任务编排
 // 1. 用编排 agent（deepseek_v41_flash 深度思考）拆解总任务 → 每个子任务分配给哪个 agent
@@ -799,6 +1234,16 @@ async function askAgentWithWait(agentId, prompt, context, waitMs) {
       error: "未知 agent: " + agentId + "，可选: " + AGENTS.map(function (a) { return a.id; }).join(", ")
     };
   }
+
+  // 网页版 agent：走浏览器自动化（不经过 Operit 模型配置）
+  if (agent.web) {
+    var webResult = await askWebAgent(agent, (context && asText(context).trim() ? "【附加上下文】\n" + asText(context).trim() + "\n\n【任务】\n" : "") + asText(prompt).trim());
+    webResult.displayName = agent.displayName;
+    webResult.persona = agent.persona;
+    webResult.modelName = "deepseek-web（浏览器）";
+    return webResult;
+  }
+
   var host = await discoverHostConfig();
   if (!host.config) {
     return { success: false, agent: agentId, error: "未找到承载模型配置，请先 aihub_setup" };
@@ -1089,12 +1534,13 @@ var agentSwarmTools = {
   aihub_broadcast: aihub_broadcast,
   aihub_status: aihub_status,
   aihub_quota: aihub_quota,
-  aihub_task: aihub_task
+  aihub_task: aihub_task,
+  aihub_weblogin: aihub_weblogin
 };
 
 function aihub_advice(params) {
   return {
-    advice: "AIHub 使用建议：\n- 用 aihub_ask 让单个 agent 回答；用 aihub_broadcast 让多个 agent 同时回答。\n- agent 可选：deepseek_v4_flash / deepseek_v41_flash / glm_5_2 / kimi_k3 / sensenova_lite。\n- 每个 agent 有独立人设（快枪手/深度思考/稳重长文/创意灵感/轻快闲聊）。\n- 首次使用前先 aihub_setup 自动建角色卡。"
+    advice: "AIHub 使用建议：\n- 用 aihub_ask 让单个 agent 回答；用 aihub_broadcast 让多个 agent 同时回答。\n- agent 可选：deepseek_v4_flash / deepseek_v41_flash / glm_5_2 / kimi_k3 / sensenova_lite / deepseek_web（网页版）。\n- 每个 agent 有独立人设（快枪手/深度思考/稳重长文/创意灵感/轻快闲聊/网页版 DeepSeek）。\n- 首次使用前先 aihub_setup 自动建角色卡；网页版 agent（deepseek_web）需先 aihub_weblogin 登录并保存 cookie。"
   };
 }
 
@@ -1105,3 +1551,4 @@ exports.aihub_broadcast = agentSwarmTools.aihub_broadcast;
 exports.aihub_status = agentSwarmTools.aihub_status;
 exports.aihub_quota = agentSwarmTools.aihub_quota;
 exports.aihub_task = agentSwarmTools.aihub_task;
+exports.aihub_weblogin = agentSwarmTools.aihub_weblogin;
