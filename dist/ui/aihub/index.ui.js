@@ -545,7 +545,7 @@ function Screen(ctx) {
     ]));
   }
 
-  // 执行中进度提示（非阻塞，让用户知道在跑）
+  // 执行中进度提示（非阻塞，让用户知道在跑；可切走，任务在后台独立会话继续）
   if (broadcastBusyState.value) {
     children.push(ctx.UI.Card({ fillMaxWidth: true, containerColor: "tertiaryContainer" }, [
       ctx.UI.Column({ padding: 12, spacing: 8 }, [
@@ -555,7 +555,7 @@ function Screen(ctx) {
           ctx.UI.Text({ text: "编排进行中…", style: "bodyMedium", fontWeight: "semiBold", color: "onTertiaryContainer" })
         ]),
         ctx.UI.Text({
-          text: "正在拆解任务 → 各 agent 独立会话并行执行 → 汇总最终结果。多 agent 场景通常需要 2-4 分钟，可在对应「AIHub/xxx」会话中查看实时进度。",
+          text: "正在拆解任务 → 各 agent 独立会话串行执行 → 汇总最终结果。可切走本页面，任务会在「AIHub/xxx」独立会话后台继续完成，完成后系统会发通知。",
           style: "bodySmall",
           color: "onTertiaryContainer"
         })
@@ -599,16 +599,31 @@ function Screen(ctx) {
     }
     for (var j = 0; j < execList.length; j++) {
       var item = execList[j];
+      // 状态：有回复=✓ / 已发送待回复=⏳ / 失败=✗
+      var statusText = "";
+      var statusColor = "primary";
+      if (item.reply) {
+        statusText = "✓ " + fmtMs(item.elapsedMs);
+        statusColor = "primary";
+      }
+      else if (item.sent) {
+        statusText = "⏳ 已发送（后台回复中）";
+        statusColor = "tertiary";
+      }
+      else {
+        statusText = "✗ " + fmtMs(item.elapsedMs);
+        statusColor = "error";
+      }
       children.push(ctx.UI.Card({ fillMaxWidth: true }, [
         ctx.UI.Column({ padding: 12, spacing: 4 }, [
           ctx.UI.Row({ verticalAlignment: "center" }, [
             ctx.UI.Text({ text: asText(item.agent), style: "bodyMedium", fontWeight: "semiBold" }),
             ctx.UI.Spacer({ weight: 1 }),
-            ctx.UI.Text({ text: (item.success ? "✓ " : "✗ ") + fmtMs(item.elapsedMs), style: "bodySmall", color: item.success ? "primary" : "error" })
+            ctx.UI.Text({ text: statusText, style: "bodySmall", color: statusColor })
           ]),
           ctx.UI.Text({ text: clipText(item.subtask, 100), style: "bodySmall", color: "onSurfaceVariant" }),
           ctx.UI.Text({
-            text: item.success ? clipText(item.reply, 300) : ("错误: " + asText(item.error)),
+            text: item.reply ? clipText(item.reply, 300) : (item.sent ? "消息已发送，模型在「AIHub/" + asText(item.agent) + "」会话后台回复中，稍后查看" : ("错误: " + asText(item.error))),
             style: "bodySmall",
             color: "onSurfaceVariant"
           })
