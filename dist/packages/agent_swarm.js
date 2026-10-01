@@ -618,33 +618,34 @@ function browserOk(raw) {
 // 启动（或复用）DeepSeek 网页浏览器会话
 async function ensureWebSession(agent) {
   var sessionName = agent.webSession || "aihub_ds_web";
+  // startBrowser 支持 session_name：同名单例会复用已有会话，而不是新开
   try {
-    // 先看有没有已存在的会话：导航到首页，若成功说明会话可用
-    var navRaw = await Tools.Network.browserNavigate({ url: agent.webUrl, session_name: sessionName });
-    var nav = parseBrowserResult(navRaw);
-    // browserNavigate 不一定支持 session_name，若失败则用 startBrowser
-    if (!browserOk(navRaw) && nav.error && asText(nav.error).indexOf("session") >= 0) {
-      var startRaw = await Tools.Network.startBrowser({ url: agent.webUrl, session_name: sessionName });
-      var start = parseBrowserResult(startRaw);
-      if (!browserOk(startRaw)) {
-        return { ok: false, error: asText(start.error || "启动浏览器失败") };
-      }
-    }
-    return { ok: true, session: sessionName };
-  }
-  catch (error) {
-    // 直接尝试启动
-    try {
-      var startRaw2 = await Tools.Network.startBrowser({ url: agent.webUrl, session_name: sessionName });
-      var start2 = parseBrowserResult(startRaw2);
-      if (!browserOk(startRaw2)) {
-        return { ok: false, error: asText(start2.error || "启动浏览器失败") };
-      }
+    var startRaw = await Tools.Network.startBrowser({ url: agent.webUrl, session_name: sessionName });
+    var start = parseBrowserResult(startRaw);
+    if (browserOk(startRaw)) {
       return { ok: true, session: sessionName };
     }
-    catch (error2) {
-      return { ok: false, error: "浏览器会话不可用: " + (error2 && error2.message ? error2.message : String(error2)) };
+    // 失败：若提示会话已存在，直接复用；否则报错
+    var errText = asText(start.error || startRaw);
+    if (errText.indexOf("exist") >= 0 || errText.indexOf("already") >= 0 || errText.indexOf("复用") >= 0) {
+      return { ok: true, session: sessionName };
     }
+    return { ok: false, error: errText || "启动浏览器失败" };
+  }
+  catch (error) {
+    var errMsg = error && error.message ? error.message : String(error);
+    // 抛错也可能是"会话已存在"类，尝试导航验证会话可用
+    try {
+      var navRaw = await Tools.Network.browserNavigate({ url: agent.webUrl });
+      var nav = parseBrowserResult(navRaw);
+      if (browserOk(navRaw) || nav.url || nav.title) {
+        return { ok: true, session: sessionName };
+      }
+    }
+    catch (error2) {
+      // 忽略
+    }
+    return { ok: false, error: "浏览器会话不可用: " + errMsg };
   }
 }
 
@@ -864,6 +865,7 @@ async function webLogin(agentId) {
     success: true,
     agent: agent.id,
     displayName: agent.displayName,
+    webUrl: agent.webUrl,
     message: "已打开 " + agent.webUrl + "。请在浏览器浮窗中登录 DeepSeek（扫码或手机号+验证码）。登录完成后，到 AIHub 协作台点「保存登录状态」或直接再调用 aihub_weblogin 的 save=true 参数来保存 cookie。",
     session: agent.webSession
   };
