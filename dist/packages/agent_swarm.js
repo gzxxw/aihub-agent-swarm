@@ -693,56 +693,6 @@ async function checkWebLogin(agent) {
   }
 }
 
-// 等待回复生成完成：DeepSeek 网页生成时底部有"停止生成"按钮，消失即完成
-async function waitReplyDone(agent, waitMs) {
-  var deadline = Date.now() + waitMs;
-  while (Date.now() < deadline) {
-    try {
-      var snapRaw = await Tools.Net.browserSnapshot({});
-      var snap = parseBrowserResult(snapRaw);
-      var text = asText(snap.text || snap.content || snap.snapshot || "");
-      // 停止生成按钮消失 = 回复完成
-      if (text.indexOf("停止生成") < 0 && text.indexOf("Stop generating") < 0) {
-        return { done: true, snapshot: text };
-      }
-    }
-    catch (error) {
-      // 忽略
-    }
-    await sleepMs(3000);
-  }
-  return { done: false, snapshot: "" };
-}
-
-// 抓取最后一条 AI 回复（消息区最后一条非用户消息文本）
-function extractLastReply(snapshotText) {
-  // 快照文本是结构化列表。简单启发式：找"assistant/AI/DeepSeek"标记后的文本
-  // 若快照含完整消息列表，取最后一段
-  var text = asText(snapshotText);
-  if (!text.trim()) {
-    return "";
-  }
-  // 快照可能是 JSON 数组/对象字符串，尝试解析消息
-  try {
-    var parsed = jsonParseSafe(text);
-    if (Array.isArray(parsed)) {
-      // 找最后一个 role=assistant 的消息
-      for (var i = parsed.length - 1; i >= 0; i--) {
-        var m = parsed[i];
-        var role = asText(m.role || "").toLowerCase();
-        if (role === "assistant" || role === "ai") {
-          return asText(m.content || m.text || m.message || "");
-        }
-      }
-    }
-  }
-  catch (error) {
-    // 非 JSON，走文本启发式
-  }
-  // 文本启发式：去掉最后一段"用户消息"后的部分。这里简化：返回去掉最前面用户输入后的整段
-  return text.length > 500 ? text.slice(-500) : text;
-}
-
 // 网页 agent 提问：浏览器发消息 + 等回复完成 + 抓取回复
 async function askWebAgent(agent, prompt) {
   var startedAt = Date.now();
@@ -770,58 +720,42 @@ async function askWebAgent(agent, prompt) {
     if (!login.loggedIn) {
       return { success: false, agent: agent.id, error: "DeepSeek 网页未登录或登录已过期，请重新运行 aihub_weblogin" };
     }
-    // 5. 找到输入框并输入（textarea / 输入框）
-    var typed = false;
+    // 5. 页面内闭环：填消息→点发送→轮询等回复→抓取（一次 browserEvaluate 完成）
+    // 实测验证：DeepSeek 发送按钮是 div[role=button].ds-button--iconLabelPrimary，不是真 <button>
+    // 回复检测用 ds-markdown.ds-assistant-message-main-content 块计数，比"停止生成消失"更精准
+    var payload = prompt.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+    var evalFn = "function(){ var ta = document.querySelector('textarea[placeholder*=\u53d1\u9001\u6d88\u606f]') || document.querySelector('textarea'); if (!ta) return { success: false, error: 'textarea-not-found' }; var getReplyCount = function(){ return document.querySelectorAll('div.ds-markdown.ds-assistant-message-main-content').length; }; var prevCount = getReplyCount(); var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set; setter.call(ta, \"" + payload + "\"); ta.dispatchEvent(new Event('input', { bubbles: true })); var sendBtn = document.querySelector('.ds-button--primary.ds-button--filled') || Array.from(document.querySelectorAll('div[role=button]')).find(function(b){ return (b.className || '').toString().indexOf('iconLabelPrimary') >= 0; }); if (!sendBtn) return { success: false, error: 'send-button-not-found' }; sendBtn.click(); return new Promise(function(resolve){ var maxWait = 60; var elapsed = 0; var poll = setInterval(function(){ elapsed += 2; var currentCount = getReplyCount(); if (currentCount > prevCount) { clearInterval(poll); var els = document.querySelectorAll('div.ds-markdown.ds-assistant-message-main-content'); var reply = (els[els.length - 1].innerText || els[els.length - 1].textContent || '').trim(); resolve({ success: true, reply: reply, waitTime: elapsed }); } else if (elapsed >= maxWait) { clearInterval(poll); resolve({ success: false, error: 'timeout', waitTime: elapsed }); } }, 2000); }); }";
+    var evalRaw = await Tools.Net.browserEvaluate({ function: evalFn });
+    var evalText = asText(evalRaw);
+    var evalIdx = evalText.lastIndexOf("### Result");
+    var evalResultText = evalIdx >= 0 ? evalText.slice(evalIdx + 10).trim() : evalText;
+    var evalResult = null;
     try {
-      // 用 browserType 需要 ref；尝试 snapshot 拿 ref
-      var snapRaw = await Tools.Net.browserSnapshot({});
-      var snap = parseBrowserResult(snapRaw);
-      var ref = snap.ref || (snap.elements && snap.elements[0] && snap.elements[0].ref) || "";
-      if (ref) {
-        await Tools.Net.browserType({ ref: ref, text: prompt, submit: true });
-        typed = true;
+      evalResult = JSON.parse(evalResultText);
+    }
+    catch (e) {
+      // 不是 JSON，原样返回
+    }
+    if (!evalResult || evalResult.success !== true) {
+      var errMsg = evalResult && evalResult.error ? evalResult.error : (evalResultText || "未知错误");
+      // 已发送但回复超时（60s 内未生成完）：标记为后台生成中，不报失败
+      if (evalResult && evalResult.error === "timeout") {
+        return {
+          success: true,
+          agent: agent.id,
+          reply: "",
+          sent: true,
+          elapsedMs: Date.now() - startedAt,
+          note: "消息已发送到 DeepSeek 网页，回复生成较慢（60s 未完成），可在浏览器会话中查看"
+        };
       }
-    }
-    catch (error) {
-      typed = false;
-    }
-    if (!typed) {
-      // 退路：browserRunCode 执行 DOM 输入 + 回车
-      var code = "(()=>{const ta=document.querySelector('textarea')||document.querySelector('[contenteditable=\"true\"]')||document.querySelector('input[type=\"text\"]');if(!ta)return 'NO_INPUT';ta.focus();const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');if(setter&&setter.set)setter.set.call(ta," + JSON.stringify(prompt) + ");else ta.value=" + JSON.stringify(prompt) + ";ta.dispatchEvent(new Event('input',{bubbles:true}));ta.dispatchEvent(new Event('change',{bubbles:true}));const ev=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true});ta.dispatchEvent(ev);return 'SENT';})()";
-      var runRaw = await Tools.Net.browserRunCode({ code: code });
-      var run = parseBrowserResult(runRaw);
-      var runResult = asText(run.result || run.output || run.data || runRaw);
-      if (runResult.indexOf("NO_INPUT") >= 0) {
-        return { success: false, agent: agent.id, error: "未找到 DeepSeek 输入框（页面结构可能变化）" };
-      }
-      typed = true;
-    }
-    // 6. 等回复完成（最多 90s）
-    var done = await waitReplyDone(agent, 90000);
-    if (!done.done) {
-      return {
-        success: true, // 已发送，回复可能还在生成，标记为"后台生成中"
-        agent: agent.id,
-        reply: "",
-        sent: true,
-        elapsedMs: Date.now() - startedAt,
-        note: "消息已发送到 DeepSeek 网页，回复生成较慢，可在浏览器会话中查看"
-      };
-    }
-    // 7. 抓取回复
-    var reply = extractLastReply(done.snapshot);
-    if (!reply) {
-      // 再等几秒重抓一次
-      await sleepMs(5000);
-      var snapRaw2 = await Tools.Net.browserSnapshot({});
-      var snap2 = parseBrowserResult(snapRaw2);
-      reply = extractLastReply(asText(snap2.text || snap2.content || snap2.snapshot || ""));
+      return { success: false, agent: agent.id, error: "DeepSeek 网页发送失败: " + errMsg };
     }
     return {
-      success: !!reply,
+      success: true,
       agent: agent.id,
-      reply: reply,
-      sent: !!reply || true,
+      reply: evalResult.reply || "",
+      sent: true,
       elapsedMs: Date.now() - startedAt
     };
   }
