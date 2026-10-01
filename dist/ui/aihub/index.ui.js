@@ -504,10 +504,55 @@ function Screen(ctx) {
       var ready = !!agent.ready;
       var selected = (selectedAgentsState.value || []).indexOf(agent.agent) >= 0;
       var isWeb = !!agent.web;
-      var statusDot = ready ? "🟢" : (isWeb ? "🔴" : "🔴");
+      var statusDot = ready ? "🟢" : "🔴";
       var statusLabel = isWeb
         ? (ready ? "已登录" : "未登录")
         : (ready ? "就绪" : (agent.modelIndex < 0 ? "模型缺失" : "未绑定"));
+      // 网页版 agent：按钮多，放卡片内部会挤压文字 → 用独立操作区
+      if (isWeb) {
+        children.push(ctx.UI.Card({ fillMaxWidth: true }, [
+          ctx.UI.Column({ padding: 12, spacing: 10 }, [
+            ctx.UI.Row({ verticalAlignment: "center" }, [
+              ctx.UI.Surface({
+                width: 44,
+                height: 44,
+                shape: { cornerRadius: 22 },
+                containerColor: agentColor
+              }, [
+                ctx.UI.Box({ fillMaxSize: true, contentAlignment: "center" }, [
+                  ctx.UI.Text({ text: (agent.displayName || agent.agent).charAt(0), style: "titleMedium", color: "onPrimary", fontWeight: "bold" })
+                ])
+              ]),
+              ctx.UI.Spacer({ width: 10 }),
+              ctx.UI.Column({ weight: 1, spacing: 2 }, [
+                ctx.UI.Text({ text: asText(agent.displayName || agent.agent), style: "bodyLarge", fontWeight: "semiBold" }),
+                ctx.UI.Text({ text: (agent.modelName || "") + (agent.modelIndex >= 0 ? " [idx " + agent.modelIndex + "]" : ""), style: "bodySmall", color: "onSurfaceVariant" }),
+                ctx.UI.Row({ spacing: 4, verticalAlignment: "center" }, [
+                  ctx.UI.Text({ text: statusDot, style: "bodySmall" }),
+                  ctx.UI.Text({ text: statusLabel, style: "bodySmall", color: ready ? "primary" : "error" }),
+                  ctx.UI.Spacer({ width: 4 }),
+                  ctx.UI.Text({ text: selected ? "✓ 已选" : "点选", style: "bodySmall", color: selected ? "primary" : "onSurfaceVariant" })
+                ])
+              ])
+            ]),
+            ctx.UI.Row({ spacing: 8 }, [
+              ctx.UI.Button({
+                text: selected ? "取消选择" : "选择",
+                onClick: function (agentId) { return function () { toggleAgent(agentId); }; }(agent.agent)
+              }),
+              ctx.UI.Button({
+                text: "登录",
+                onClick: function (agentId) { return function () { doWebLogin(agentId); }; }(agent.agent)
+              }),
+              ctx.UI.Button({
+                text: "保存登录",
+                onClick: function (agentId) { return function () { saveWebLogin(agentId); }; }(agent.agent)
+              })
+            ])
+          ])
+        ]));
+        continue;
+      }
       children.push(ctx.UI.Card({ fillMaxWidth: true }, [
         ctx.UI.Row({ padding: 12, verticalAlignment: "center" }, [
           ctx.UI.Surface({
@@ -534,16 +579,8 @@ function Screen(ctx) {
           ctx.UI.Button({
             text: selected ? "取消" : "选择",
             onClick: function (agentId) { return function () { toggleAgent(agentId); }; }(agent.agent)
-          }),
-          isWeb ? ctx.UI.Button({
-            text: "登录",
-            onClick: function (agentId) { return function () { doWebLogin(agentId); }; }(agent.agent)
-          }) : null,
-          isWeb ? ctx.UI.Button({
-            text: "保存登录",
-            onClick: function (agentId) { return function () { saveWebLogin(agentId); }; }(agent.agent)
-          }) : null
-        ].filter(function (item) { return item !== null; }))
+          })
+        ])
       ]));
     }
   }
