@@ -76,6 +76,7 @@ aihub_task({ task: "...", mode: "execute", plan: [...] })
 - **编排降级**：编排 agent 输出占位符 JSON 时自动检测（`hasPlaceholderPlan`）并规则降级分配（`buildFallbackPlan`）
 - **防中断**：`sendMessage` 发出即返回（不阻塞等待），回复由 `getMessages` 轮询收集；即使切走 UI 页面，模型也在独立会话后台继续回复，完成后系统发通知
 - **防限额**：子任务**严格串行**执行（同一时间只跑 1 个 agent），避免并发触发 RPM/并发限额导致中断；回复未取到时标记"已发送待回复"，可在对应「AIHub/xxx」会话查看完整结果
+- **网页版 agent（DeepSeek）**：`deepseek_web` 通过浏览器自动化接入 chat.deepseek.com（无需 API Key）——首次运行 `aihub_weblogin` 打开网页手动登录（扫码/手机号），登录后调用 `aihub_weblogin({save: true})` 保存 cookie；之后该 agent 自动用浏览器会话发消息并读取回复，参与单问/广播/任务编排
 
 ## 📄 许可证
 
