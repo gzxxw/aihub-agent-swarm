@@ -1,0 +1,10 @@
+{
+  "name": "com.agent.swarm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIHub 多Agent协作台 ToolPkg",
+  "main": "dist/main.js",
+  "scripts": {
+    "check": "node --check dist/main.js && node --check dist/packages/agent_swarm.js && node --check dist/ui/aihub/index.ui.js"
+  }
+}
