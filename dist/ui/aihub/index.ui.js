@@ -14,21 +14,24 @@ var TOOL_BROADCAST = "aihub_broadcast";
 var TOOL_STATUS = "aihub_status";
 var TOOL_QUOTA = "aihub_quota";
 var TOOL_TASK = "aihub_task";
+var TOOL_WEBLOGIN = "aihub_weblogin";
 
-var AGENT_IDS = ["deepseek_v4_flash", "deepseek_v41_flash", "glm_5_2", "kimi_k3", "sensenova_lite"];
+var AGENT_IDS = ["deepseek_v4_flash", "deepseek_v41_flash", "glm_5_2", "kimi_k3", "sensenova_lite", "deepseek_web"];
 var AGENT_LABELS = {
   deepseek_v4_flash: "DeepSeek V4 Flash",
   deepseek_v41_flash: "DeepSeek V4.1 Flash",
   glm_5_2: "GLM 5.2",
   kimi_k3: "Kimi K3",
-  sensenova_lite: "商量 6.8 Lite"
+  sensenova_lite: "商量 6.8 Lite",
+  deepseek_web: "DeepSeek 网页版"
 };
 var AGENT_COLORS = {
   deepseek_v4_flash: "#4FC3F7",
   deepseek_v41_flash: "#B39DDB",
   glm_5_2: "#FFB74D",
   kimi_k3: "#F06292",
-  sensenova_lite: "#81C784"
+  sensenova_lite: "#81C784",
+  deepseek_web: "#90A4AE"
 };
 
 function asText(value) {
@@ -357,6 +360,53 @@ function Screen(ctx) {
     selectedAgentsState.set(next);
   };
 
+  // 网页版 agent 登录：打开 DeepSeek 网页浏览器浮窗，用户手动登录
+  var doWebLogin = async function (agentId) {
+    statusTextState.set("正在打开 DeepSeek 网页…");
+    errorState.set("");
+    try {
+      var result = await callTool(ctx, TOOL_WEBLOGIN, { agent: agentId });
+      if (!result || !result.success) {
+        errorState.set((result && result.error) || "打开网页失败");
+      }
+      else {
+        pushLog({
+          t: Date.now(),
+          kind: "weblogin",
+          text: "已打开 " + asText(result.webUrl || "DeepSeek 网页") + "，请在浏览器浮窗登录"
+        });
+        statusTextState.set("请在浏览器浮窗中登录 DeepSeek，登录后点「保存登录」");
+      }
+    }
+    catch (error) {
+      errorState.set(toErrorText(error));
+    }
+  };
+
+  // 保存网页版 agent 登录 cookie（登录完成后调用）
+  var saveWebLogin = async function (agentId) {
+    statusTextState.set("正在保存登录状态…");
+    errorState.set("");
+    try {
+      var result = await callTool(ctx, TOOL_WEBLOGIN, { agent: agentId, save: true });
+      if (!result || !result.success) {
+        errorState.set((result && result.error) || "保存失败");
+      }
+      else {
+        pushLog({
+          t: Date.now(),
+          kind: "weblogin",
+          text: "已保存 " + asText(result.cookieCount || 0) + " 条 cookie，网页版 agent 可用"
+        });
+        statusTextState.set("登录状态已保存");
+        await refreshStatus();
+      }
+    }
+    catch (error) {
+      errorState.set(toErrorText(error));
+    }
+  };
+
   var children = [];
 
   // 标题区
@@ -453,8 +503,11 @@ function Screen(ctx) {
       var agentColor = AGENT_COLORS[agent.agent] || "#888888";
       var ready = !!agent.ready;
       var selected = (selectedAgentsState.value || []).indexOf(agent.agent) >= 0;
-      var statusDot = ready ? "🟢" : "🔴";
-      var statusLabel = ready ? "就绪" : (agent.modelIndex < 0 ? "模型缺失" : "未绑定");
+      var isWeb = !!agent.web;
+      var statusDot = ready ? "🟢" : (isWeb ? "🔴" : "🔴");
+      var statusLabel = isWeb
+        ? (ready ? "已登录" : "未登录")
+        : (ready ? "就绪" : (agent.modelIndex < 0 ? "模型缺失" : "未绑定"));
       children.push(ctx.UI.Card({ fillMaxWidth: true }, [
         ctx.UI.Row({ padding: 12, verticalAlignment: "center" }, [
           ctx.UI.Surface({
@@ -481,8 +534,16 @@ function Screen(ctx) {
           ctx.UI.Button({
             text: selected ? "取消" : "选择",
             onClick: function (agentId) { return function () { toggleAgent(agentId); }; }(agent.agent)
-          })
-        ])
+          }),
+          isWeb ? ctx.UI.Button({
+            text: "登录",
+            onClick: function (agentId) { return function () { doWebLogin(agentId); }; }(agent.agent)
+          }) : null,
+          isWeb ? ctx.UI.Button({
+            text: "保存登录",
+            onClick: function (agentId) { return function () { saveWebLogin(agentId); }; }(agent.agent)
+          }) : null
+        ].filter(function (item) { return item !== null; }))
       ]));
     }
   }
