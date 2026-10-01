@@ -22,7 +22,7 @@ var AGENT_LABELS = {
   deepseek_v41_flash: "DeepSeek V4.1 Flash",
   glm_5_2: "GLM 5.2",
   kimi_k3: "Kimi K3",
-  sensenova_lite: "商量 6.8 Lite",
+  sensenova_lite: "商汤 6.8 Lite",
   deepseek_web: "DeepSeek 网页版"
 };
 var AGENT_COLORS = {
