@@ -218,7 +218,7 @@ var AGENTS = [
   {
     id: "sensenova_lite",
     modelName: "sensenova-6.8-flash-lite",
-    displayName: "商量 6.8 Flash Lite",
+    displayName: "商汤 6.8 Flash Lite",
     persona: "你是『轻快的伙伴』，擅长日常闲聊、轻松问答、简洁回复。语气亲切自然，回答简短有温度。",
     color: "#81C784",
     description: "轻快闲聊助手"
