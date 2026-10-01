@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.agent.swarm",
+  "version": "0.1.0",
+  "api_version": "1.0.0",
+  "main": "dist/main.js",
+  "display_name": {
+    "zh": "AIHub 多Agent协作台",
+    "en": "AIHub Multi-Agent Hub"
+  },
+  "description": {
+    "zh": "把 Operit 原生多个模型包装为独立 agent：单人设、可路由、可广播、可监控的协作台。",
+    "en": "Wrap Operit built-in models as independent agents: per-persona, routable, broadcastable, monitorable."
+  },
+  "enabled_by_default": true,
+  "subpackages": [
+    {
+      "id": "agent_swarm",
+      "entry": "dist/packages/agent_swarm.js"
+    }
+  ]
+}
