@@ -417,7 +417,8 @@ async function setupAllAgents() {
 
 // ---------------------------------------------------------------------------
 // 发送提问：为 agent 建/复用专属 chat，绑定角色卡，sendMessage
-// ---------------------------------------------------------------------------
+// 改造：sendMessage 发出后立即返回（不阻塞等待模型回复），回复由 collectReply 轮询取回
+// 这样即使 UI 切走/销毁，模型也会在独立 chat 继续回复，任务不中断
 
 async function ensureAgentChat(agent, cardId) {
   // 查找已有 AIHub 专属 chat（标题含 agent id + AIHub），有则复用
@@ -454,6 +455,72 @@ async function ensureAgentChat(agent, cardId) {
     }
   }
   return chatId;
+}
+
+// 发送消息并等待回复（带超时保护：发出即算成功，回复可稍后取回）
+async function sendAndCollect(agent, chatId, cardId, prompt, waitMs) {
+  var waitLimit = waitMs || 30000; // 默认最多等 30s 拿回复
+  var startedAt = Date.now();
+  var sent = false;
+  var sendError = "";
+  try {
+    // sendMessage(message, chatId, roleCardId, senderName, options)
+    // 注意：不设 timeout_ms 或设大值，避免调用层超时取消；notify_reply 让系统在回复完成时通知
+    var sendPromise = Tools.Chat.sendMessage(prompt, chatId, cardId, agent.displayName, {
+      timeout_ms: 600000,
+      persist_turn: true,
+      hide_user_message: true,
+      notify_reply: true
+    });
+    // 用 race 兜底：即使 sendMessage 长时间不 resolve，也不阻塞编排
+    var timeoutPromise = new Promise(function (resolve) {
+      setTimeout(function () { resolve(null); }, 15000);
+    });
+    var sendResult = await Promise.race([sendPromise, timeoutPromise]);
+    sent = true;
+  }
+  catch (error) {
+    sendError = error && error.message ? error.message : String(error);
+    sent = false;
+  }
+
+  // 轮询取回复（最多 waitLimit）
+  var reply = "";
+  var pollDeadline = Date.now() + waitLimit;
+  while (Date.now() < pollDeadline) {
+    try {
+      var msgs = await Tools.Chat.getMessages(chatId, { order: "desc", limit: 1 });
+      var list = (msgs && msgs.messages) || [];
+      if (list.length > 0) {
+        var last = list[0];
+        var text = firstNonBlank(last.content, last.text, last.message, last.aiResponse, last.role);
+        // 只取 AI 回复且非空
+        var role = asText(last.role || "").toLowerCase();
+        if ((role === "ai" || role === "assistant" || !role) && asText(text).trim() && asText(text).indexOf(agent.displayName) < 0) {
+          reply = asText(text);
+          break;
+        }
+      }
+    }
+    catch (error) {
+      // 轮询失败继续重试
+    }
+    await sleepMs(3000);
+  }
+
+  return {
+    sent: sent,
+    sendError: sendError,
+    reply: reply,
+    elapsedMs: Date.now() - startedAt,
+    chatId: chatId
+  };
+}
+
+function sleepMs(ms) {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
 }
 
 async function askAgent(agentId, prompt, context) {
@@ -504,44 +571,26 @@ async function askAgent(agentId, prompt, context) {
     finalPrompt = "【附加上下文】\n" + asText(context).trim() + "\n\n【任务】\n" + asText(prompt).trim();
   }
 
-  var startedAt = Date.now();
-  try {
-    // sendMessage(message, chatId, roleCardId, senderName, options)
-    var sendResult = await Tools.Chat.sendMessage(finalPrompt, chatId, cardId, agent.displayName, {
-      timeout_ms: 180000,
-      persist_turn: true,
-      hide_user_message: true,
-      notify_reply: false
-    });
-    var elapsedMs = Date.now() - startedAt;
-    var reply = "";
-    if (sendResult) {
-      // MessageSendResultData 字段：aiResponse / message / chatId
-      reply = firstNonBlank(sendResult.aiResponse, sendResult.reply, sendResult.text, sendResult.content, sendResult.message);
-    }
-    return {
-      success: !!reply,
-      agent: agentId,
-      displayName: agent.displayName,
-      persona: agent.persona,
-      modelName: agent.modelName,
-      cardId: cardId,
-      chatId: chatId,
-      reply: reply,
-      elapsedMs: elapsedMs,
-      configId: host.config.id,
-      configName: host.config.name
-    };
-  }
-  catch (error) {
-    return {
-      success: false,
-      agent: agentId,
-      error: error && error.message ? error.message : String(error),
-      elapsedMs: Date.now() - startedAt,
-      chatId: chatId
-    };
-  }
+  var result = await sendAndCollect(agent, chatId, cardId, finalPrompt, 30000);
+
+  // 若轮询未取到回复但消息已发出：标记为"已发送待回复"，不算失败（模型会在后台继续）
+  var success = !!result.reply || result.sent;
+  return {
+    success: success,
+    agent: agentId,
+    displayName: agent.displayName,
+    persona: agent.persona,
+    modelName: agent.modelName,
+    cardId: cardId,
+    chatId: chatId,
+    reply: result.reply,
+    sent: result.sent,
+    sendError: result.sendError,
+    elapsedMs: result.elapsedMs,
+    configId: host.config.id,
+    configName: host.config.name,
+    note: result.reply ? "" : "消息已发送，模型正在独立会话后台回复，可稍后在「AIHub/" + agent.displayName + "」会话查看完整结果"
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -731,8 +780,70 @@ function buildAgentCatalogText() {
 }
 
 async function askAgentRaw(agentId, prompt) {
-  // 复用 askAgent 但强制独立会话
-  return await askAgent(agentId, prompt, "");
+  // 复用 askAgent 但强制独立会话；等待回复最长 90s（串行执行场景）
+  return await askAgentWithWait(agentId, prompt, "", 90000);
+}
+
+async function askAgentWithWait(agentId, prompt, context, waitMs) {
+  // 与 askAgent 相同，但可自定义等待时长（编排执行用更长等待，避免回复慢导致"假中断"）
+  var agent = null;
+  for (var i = 0; i < AGENTS.length; i++) {
+    if (AGENTS[i].id === agentId) {
+      agent = AGENTS[i];
+      break;
+    }
+  }
+  if (!agent) {
+    return {
+      success: false,
+      error: "未知 agent: " + agentId + "，可选: " + AGENTS.map(function (a) { return a.id; }).join(", ")
+    };
+  }
+  var host = await discoverHostConfig();
+  if (!host.config) {
+    return { success: false, agent: agentId, error: "未找到承载模型配置，请先 aihub_setup" };
+  }
+  var cards = await listCharacterCards();
+  var card = await findAgentCard(cards, agentId);
+  var cardId = card ? asText(card.id) : "";
+  if (!cardId) {
+    var modelIndex = modelIndexOf(host.config, agent.modelName);
+    if (modelIndex < 0) {
+      return {
+        success: false,
+        agent: agentId,
+        error: "模型 " + agent.modelName + " 不在配置 " + host.config.name + " 中，请先 aihub_setup"
+      };
+    }
+    var createResult = await createAgentCard(agent, host.config.id, modelIndex);
+    cardId = createResult.cardId;
+  }
+  var chatId = await ensureAgentChat(agent, cardId);
+  if (!chatId) {
+    return { success: false, agent: agentId, error: "创建 agent 独立会话失败（chat service 不可用）" };
+  }
+  var finalPrompt = prompt;
+  if (context && asText(context).trim()) {
+    finalPrompt = "【附加上下文】\n" + asText(context).trim() + "\n\n【任务】\n" + asText(prompt).trim();
+  }
+  var result = await sendAndCollect(agent, chatId, cardId, finalPrompt, waitMs);
+  var success = !!result.reply || result.sent;
+  return {
+    success: success,
+    agent: agentId,
+    displayName: agent.displayName,
+    persona: agent.persona,
+    modelName: agent.modelName,
+    cardId: cardId,
+    chatId: chatId,
+    reply: result.reply,
+    sent: result.sent,
+    sendError: result.sendError,
+    elapsedMs: result.elapsedMs,
+    configId: host.config.id,
+    configName: host.config.name,
+    note: result.reply ? "" : "消息已发送，模型正在独立会话后台回复，可稍后在「AIHub/" + agent.displayName + "」会话查看完整结果"
+  };
 }
 
 async function aihub_task(params) {
@@ -812,8 +923,10 @@ async function aihub_task(params) {
     var planStartedAt = Date.now();
 
     // 第 2 步：各 agent 独立会话执行子任务
-    // 同一 agent 的子任务串行（避免同一专属会话并发错配），不同 agent 之间并行（显著提速）
-    var planItems = [];
+    // 防限额中断：严格串行（同一时间只跑 1 个 agent），避免并发触发 RPM/并发限额
+    // 每个子任务等待回复最长 90s；超时未取到回复则标记"已发送待回复"，模型继续在独立会话后台跑
+    var execStartedAt = Date.now();
+    var executions = [];
     for (var i = 0; i < planJson.length; i++) {
       var item = planJson[i];
       var agentId = asText(item.agent).trim();
@@ -829,67 +942,49 @@ async function aihub_task(params) {
       if (!valid) {
         agentId = candidates[0] || ORCHESTRATOR_AGENT; // 兜底
       }
-      planItems.push({ agent: agentId, subtask: subtask, reason: asText(item.reason).trim() });
-    }
-
-    var groups = {};
-    for (var g = 0; g < planItems.length; g++) {
-      var gid = planItems[g].agent;
-      if (!groups[gid]) {
-        groups[gid] = [];
-      }
-      groups[gid].push(planItems[g]);
-    }
-
-    var execStartedAt = Date.now();
-    var groupKeys = Object.keys(groups);
-    var groupResults = await Promise.all(groupKeys.map(function (key) {
-      return (async function () {
-        var list = [];
-        for (var m = 0; m < groups[key].length; m++) {
-          var it = groups[key][m];
-          var execResult = await askAgentRaw(it.agent, "请完成以下子任务：\n" + it.subtask + "\n\n（这是整体任务的一部分，请给出可直接交付的结果。）");
-          list.push({
-            agent: it.agent,
-            subtask: it.subtask,
-            reason: it.reason,
-            success: execResult.success,
-            reply: execResult.reply || "",
-            error: execResult.error || "",
-            elapsedMs: execResult.elapsedMs || 0,
-            chatId: execResult.chatId || ""
-          });
-        }
-        return list;
-      })();
-    }));
-
-    var executions = [];
-    for (var r = 0; r < groupResults.length; r++) {
-      executions = executions.concat(groupResults[r]);
+      var execResult = await askAgentRaw(agentId, "请完成以下子任务：\n" + subtask + "\n\n（这是整体任务的一部分，请给出可直接交付的结果。）");
+      executions.push({
+        agent: agentId,
+        subtask: subtask,
+        reason: asText(item.reason).trim(),
+        success: execResult.success,
+        reply: execResult.reply || "",
+        sent: !!execResult.sent,
+        error: execResult.error || (execResult.sendError || ""),
+        elapsedMs: execResult.elapsedMs || 0,
+        chatId: execResult.chatId || "",
+        note: execResult.note || ""
+      });
     }
     var execWallMs = Date.now() - execStartedAt;
 
     // 第 3 步：汇总（用编排 agent 整合各结果成一份交付）
-    // 优化：单子任务且成功 → 直接交付，跳过汇总（省一次模型调用，简单任务更快）
+    // 只对"已取到回复"的子任务做智能汇总；未取到回复的标注为后台处理中，直接拼接原始内容
     var parts = executions.map(function (e, idx) {
-      return "【子任务" + (idx + 1) + "｜" + e.agent + "】" + e.subtask + "\n结果：" + (e.success ? e.reply : "（失败：" + e.error + "）");
+      var resultText = e.reply ? e.reply : (e.sent ? "（消息已发送，回复仍在独立会话后台生成中，可查看「AIHub/" + e.agent + "」会话）" : "（失败：" + e.error + "）");
+      return "【子任务" + (idx + 1) + "｜" + e.agent + "】" + e.subtask + "\n结果：" + resultText;
     }).join("\n\n");
 
+    var gotReplies = executions.filter(function (e) { return !!e.reply; });
     var summarySkipped = false;
     var summaryResult = null;
     var finalOutput = "";
-    if (executions.length === 1 && executions[0].success) {
+    if (gotReplies.length === 1 && executions.length === 1) {
       summarySkipped = true;
       finalOutput = executions[0].reply;
     }
+    else if (gotReplies.length === 0) {
+      // 没有任何回复：不调用汇总（会拿到空），直接给提示
+      summarySkipped = true;
+      finalOutput = "任务已派发给各 agent，正在独立会话后台执行中。请稍后切换到「AIHub/xxx」会话查看各 agent 的完整结果。\n\n" + parts;
+    }
     else {
-      var summaryPrompt = "你是 AIHub 最终汇总器。下面是一个总任务被拆解后，各个 agent 独立完成的结果。请把它们整合成一份完整、连贯、可直接交付的最终答案（按逻辑组织，去掉重复，补上缺失的衔接）。\n\n" +
+      var summaryPrompt = "你是 AIHub 最终汇总器。下面是一个总任务被拆解后，各个 agent 独立完成的结果。请把它们整合成一份完整、连贯、可直接交付的最终答案（按逻辑组织，去掉重复，补上缺失的衔接）。若某子任务标注'后台生成中'，请说明该部分稍后可在对应 agent 会话查看。\n\n" +
         "总任务：\n" + task + "\n\n" +
         "各子任务结果：\n" + parts;
 
       summaryResult = await askAgentRaw(ORCHESTRATOR_AGENT, summaryPrompt);
-      finalOutput = summaryResult.success ? summaryResult.reply : (parts);
+      finalOutput = summaryResult.success && summaryResult.reply ? summaryResult.reply : (parts);
     }
 
     return {
